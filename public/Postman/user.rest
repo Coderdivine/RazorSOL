@@ -1,0 +1,63 @@
+
+POST https://redesign-axgura.herokuapp.com/user/register
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "email":"chimdi4332@gmail.com",
+    "password":"Common@2"
+}
+###
+POST https://redesign-axgura.herokuapp.com/user/login
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "email":"chimdi4332@gmail.com",
+    "password":"Common@2"
+}
+
+###
+POST https://redesign-axgura.herokuapp.com/user/dlt
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "email":"axgurah@gmail.com"
+}
+###
+GET http://localhost:5001/user/user-data/74c490e8-ee52-4749-abae-8b1ef1c91357
+Authorization: Bearer eTYsv...
+
+###
+POST https://redesign-axgura.herokuapp.com/user/reset-password
+Authorization: Bearer eTYsvyehbhhHhHnjbHCg.eW
+Content-Type: application/json
+
+{
+    "email":"chimdi4332@gmail.com"
+}
+###
+POST https://redesign-axgura.herokuapp.com/user/verify-reset-password
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "email":"chimdi4332@gmail.com",
+    "otp":"493603",
+    "new_password":"Common@3"
+}
+
+###
+POST http://localhost:5001/user/update-ifno
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "email":"chimdi4332@gmail.com",
+    "user_id":"74c490e8-ee52-4749-abae-8b1ef1c91357",
+    "username":"Chimdindu",
+    "token":120
+}
+
+###

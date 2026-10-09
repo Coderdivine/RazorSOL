@@ -1,0 +1,30 @@
+
+POST http://localhost:5001/flw/create-payment
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+    "name":"FireBasePayment",
+    "amount":10,
+    "currency":"NGN",
+    "user_id":"74c490e8-ee52-4749-abae-8b1ef1c91357"
+}
+
+###
+
+POST http://localhost:5001/flw/payment-link
+Authorization: Bearer eTYsv...
+Content-Type: application/json
+
+{
+
+    "amount":200,
+    "currency":"NGN",
+    "user_id":"74c490e8-ee52-4749-abae-8b1ef1c91357"
+}
+
+###
+GET http://localhost:5001/flw/cancel-payment/37419/74c490e8-ee52-4749-abae-8b1ef1c91357
+
+###
+GET http://localhost:5001/flw/get-payment/37419/74c490e8-ee52-4749-abae-8b1ef1c91357
