@@ -20,7 +20,6 @@
     "express-rate-limit": "^7.1.4",
     "express-useragent": "^1.0.15",
     "helmet": "^7.1.0",
-    "jsonwebtoken": "^8.5.1",
     "moment": "^2.29.4",
     "mongodb": "^5.1.0",
     "mongoose": "^6.2.4",
