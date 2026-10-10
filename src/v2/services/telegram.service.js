@@ -168,7 +168,13 @@ I automatically track Market Cap milestones.
         ctx.reply(response, { parse_mode: 'Markdown' });
     }
 
-    handleSimulate(ctx) {
+    async handleSimulate(ctx) {
+        // Send a real-time message indicating it's running
+        const waitingMsg = await ctx.reply("⚙️ *Running real-time simulation...* Please wait while I calculate network fees and profit metrics.", { parse_mode: "Markdown" });
+        
+        // Wait 3 seconds to simulate calculation
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
         const simulationText = `
 🧪 *Profit vs Gas Simulation (20 Trades)*
 
@@ -184,7 +190,15 @@ I automatically track Market Cap milestones.
 - Net Profit required to breakeven: ~10% per trade.
 - *Verdict: 70/30 TP strategy recommended to leave moonbags.*
         `;
-        ctx.reply(simulationText, { parse_mode: "Markdown" });
+        
+        // Update the waiting message with the results
+        ctx.telegram.editMessageText(
+            ctx.chat.id, 
+            waitingMsg.message_id, 
+            null, 
+            simulationText, 
+            { parse_mode: "Markdown" }
+        );
     }
 }
 

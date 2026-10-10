@@ -133,12 +133,20 @@ class TradeEngine {
         const targetWalletBalance = await solanaService.getSolBalance(watchedWallet.walletAddress);
         const spentSol = tradeEvent.solAmount;
         
-        if(targetWalletBalance <= 0 || !spentSol) return;
-        
-        const scaleFactor = spentSol / targetWalletBalance;
-        
         await this.updateMyBalance();
-        let myTradeSize = this.myBalance * scaleFactor;
+        let myTradeSize = 0;
+        
+        // Fallback Mechanism if RPC fails to return a valid balance for target wallet
+        if (!targetWalletBalance || targetWalletBalance <= 0) {
+            console.log(`:::> [FALLBACK] RPC failed to fetch balance for ${watchedWallet.walletAddress}. Using default 5% allocation.`);
+            myTradeSize = this.myBalance * 0.05; // Fallback to 5% of our balance
+        } else if (!spentSol) {
+            return;
+        } else {
+            const scaleFactor = spentSol / targetWalletBalance;
+            myTradeSize = this.myBalance * scaleFactor;
+            console.log(`:::> Copying trade from ${watchedWallet.walletAddress}. Target spent ${spentSol} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%). Calculated Trade: ${myTradeSize} SOL`);
+        }
         
         // Safeguards
         if(myTradeSize > this.myBalance * 0.1) {
@@ -148,8 +156,6 @@ class TradeEngine {
             myTradeSize = 0.01; // Minimum trade
         }
 
-        console.log(`:::> Copying trade from ${watchedWallet.walletAddress}. Target spent ${spentSol} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%). Executing ${myTradeSize} SOL`);
-        
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
     }
 
