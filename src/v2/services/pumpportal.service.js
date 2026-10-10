@@ -45,7 +45,7 @@ class PumpPortalService {
                 const message = JSON.parse(data);
                 await this.handleMessage(message);
             } catch (err) {
-                console.error("[PUMPPORTAL] ❌ Error parsing incoming WS message:", err.message);
+                console.error("[PUMPPORTAL] ❌ Error processing incoming WS message:", err.message);
             }
         });
 
