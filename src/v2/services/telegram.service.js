@@ -200,6 +200,15 @@ I automatically track Market Cap milestones.
             { parse_mode: "Markdown" }
         );
     }
+
+    sendAlert(message) {
+        if (!this.bot) return;
+        const channelId = process.env.TELEGRAM_ALERTS_CHANNEL;
+        if (channelId) {
+            this.bot.telegram.sendMessage(channelId, message, { parse_mode: 'Markdown' })
+                .catch(err => console.error("<::: Telegram Alert Error:", err.message));
+        }
+    }
 }
 
 module.exports = new TelegramService();

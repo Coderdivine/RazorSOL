@@ -156,6 +156,11 @@ class TradeEngine {
             myTradeSize = 0.01; // Minimum trade
         }
 
+        // Notify Telegram Channel
+        const telegramService = require('./telegram.service');
+        const alertMsg = `🚨 *Whale Buy Detected!*\n\n*Target Wallet:* \`${watchedWallet.walletAddress}\`\n*Token:* \`${tradeEvent.mint}\`\n*Whale Spent:* ${spentSol} SOL\n\n🗡️ *Razor Bot* is executing a copy-trade of ${myTradeSize.toFixed(4)} SOL!`;
+        telegramService.sendAlert(alertMsg);
+
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
     }
 
