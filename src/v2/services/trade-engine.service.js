@@ -51,8 +51,9 @@ class TradeEngine {
     async handleNewToken(msg) {
         const mint = msg.mint;
         const initialMC = msg.marketCapSol || 0; 
+        const mcUSD = initialMC * solanaService.getSolPriceUSD();
         
-        console.log(`[TRADE-ENGINE] 🆕 Registering new token in memory cache: ${mint} at MC: ${initialMC}`);
+        console.log(`[TRADE-ENGINE] 🆕 Registering new token in memory cache: ${mint} at MC: $${mcUSD.toFixed(2)}`);
         
         // Save to fast in-memory map instead of DB to prevent MongoDB write limit issues
         this.tokenCache.set(mint, {
@@ -105,15 +106,17 @@ class TradeEngine {
             updated = true;
         }
         
+        const currentMC_USD = currentMC * solanaService.getSolPriceUSD();
+        
         // Check for new milestones
         for(let ms of this.MILESTONES) {
-            if(currentMC >= ms && !token.milestonesHit.includes(ms)) {
-                console.log(`[TRADE-ENGINE] 🚀 Token ${mint} hit milestone: ${ms} MC!`);
+            if(currentMC_USD >= ms && !token.milestonesHit.includes(ms)) {
+                console.log(`[TRADE-ENGINE] 🚀 Token ${mint} hit milestone: $${ms} MC!`);
                 token.milestonesHit.push(ms);
                 updated = true;
                 
                 // Trigger milestone snipe logic
-                await this.evaluateMilestoneSnipe(token, currentMC);
+                await this.evaluateMilestoneSnipe(token, currentMC_USD);
             }
         }
         
@@ -126,11 +129,11 @@ class TradeEngine {
         }
     }
     
-    async evaluateMilestoneSnipe(token, currentMC) {
+    async evaluateMilestoneSnipe(token, currentMC_USD) {
         if(token.milestonesHit.includes(10000) && token.milestonesHit.includes(20000)) {
             const existing = await ActiveTrade.findOne({ mint: token.mint });
             if(!existing) {
-                console.log(`[TRADE-ENGINE] 🔫 Milestones 10k & 20k hit for ${token.mint}. Executing SNIPING logic to 50k!`);
+                console.log(`[TRADE-ENGINE] 🔫 Milestones $10k & $20k hit for ${token.mint}. Executing SNIPING logic to $50k!`);
                 const tradeAmountSol = 0.05; // Make this configurable
                 await this.executeTradeLocal(token.mint, "buy", tradeAmountSol, true, 0.002, "MILESTONE_SNIPE");
             }
@@ -174,7 +177,7 @@ class TradeEngine {
             tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
         }
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
-        const mcTracker = tradeEvent.marketCapSol ? `${tradeEvent.marketCapSol.toFixed(2)} SOL` : 'Unknown';
+        const mcTracker = tradeEvent.marketCapSol ? `$${(tradeEvent.marketCapSol * solanaService.getSolPriceUSD()).toFixed(2)}` : 'Unknown';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
 
         const telegramService = require('./telegram.service');
@@ -191,19 +194,19 @@ class TradeEngine {
         for(let trade of activeTrades) {
             if(trade.status === "OPEN") {
                 if(currentMC <= (trade.entryMarketCap / this.STOP_LOSS_FACTOR)) {
-                    console.log(`[TRADE-ENGINE] 🛑 Stop Loss Triggered on ${mint} at MC: ${currentMC}. Executing sell!`);
+                    console.log(`[TRADE-ENGINE] 🛑 Stop Loss Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Executing sell!`);
                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                     continue;
                 }
                 if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
-                    console.log(`[TRADE-ENGINE] 💸 Take Profit (2x) Triggered on ${mint} at MC: ${currentMC}. Securing profit!`);
+                    console.log(`[TRADE-ENGINE] 💸 Take Profit (2x) Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Securing profit!`);
                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                     trade.status = "TP_TAKEN_WAITING_REENTRY";
                     await trade.save();
                 }
             } else if (trade.status === "REENTERED") {
                  if(currentMC < trade.entryMarketCap) {
-                     console.log(`[TRADE-ENGINE] 🛑 Re-entry Stop Loss Triggered on ${mint} at MC: ${currentMC}. Executing sell!`);
+                     console.log(`[TRADE-ENGINE] 🛑 Re-entry Stop Loss Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Executing sell!`);
                      await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                  }
                  else if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
@@ -216,7 +219,7 @@ class TradeEngine {
         const waitingTrades = await ActiveTrade.find({ mint, status: "TP_TAKEN_WAITING_REENTRY" });
         for(let trade of waitingTrades) {
              if(currentMC <= trade.entryMarketCap * 1.05) { 
-                 console.log(`[TRADE-ENGINE] 🦅 Dip detected on ${mint}. Re-entering with 50% initial capital at MC: ${currentMC}`);
+                 console.log(`[TRADE-ENGINE] 🦅 Dip detected on ${mint}. Re-entering with 50% initial capital at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}`);
                  const reEntryAmount = trade.amountSolInvested * 0.5;
                  await this.executeTradeLocal(mint, "buy", reEntryAmount, true, 0.0001, "MILESTONE_SNIPE", null, trade._id, true);
              }

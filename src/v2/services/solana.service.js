@@ -16,6 +16,29 @@ class SolanaService {
             return 0;
         }
     }
+
+    async startSolPriceTracker() {
+        this.cachedSolPrice = 150;
+        const fetchPrice = async () => {
+            try {
+                const axios = require('axios');
+                const response = await axios.get('https://price.jup.ag/v6/price?ids=SOL');
+                if (response.data && response.data.data && response.data.data.SOL) {
+                    this.cachedSolPrice = response.data.data.SOL.price;
+                }
+            } catch (err) {
+                // Silent catch for background task
+            }
+        };
+        await fetchPrice();
+        setInterval(fetchPrice, 60000); // Update every 60 seconds
+    }
+
+    getSolPriceUSD() {
+        return this.cachedSolPrice || 150;
+    }
 }
 
-module.exports = new SolanaService();
+const service = new SolanaService();
+service.startSolPriceTracker();
+module.exports = service;
