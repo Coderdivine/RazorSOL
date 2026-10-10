@@ -9,12 +9,12 @@ class TelegramService {
 
     init() {
         if (!TELEGRAM_BOT_TOKEN) {
-            console.log("<::: No Telegram Bot Token found. Telegram controller disabled.");
+            console.log("[TELEGRAM] ⚠️ No Telegram Bot Token found. Telegram controller disabled.");
             return;
         }
 
         this.bot = new Telegraf(TELEGRAM_BOT_TOKEN);
-        console.log(":::> Telegram Bot Controller started (Telegraf).");
+        console.log("[TELEGRAM] 🤖 Telegram Bot Controller initialized.");
 
         this.registerCommands();
         this.registerActions();
@@ -38,18 +38,25 @@ class TelegramService {
     registerCommands() {
         // Start Command
         this.bot.start((ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /start command from user: ${ctx.chat.id}`);
             const msg = `Welcome to *Razor Trading Bot* 🗡️\n\nI am running 24/7 on Render to monitor Solana meme tokens and execute precision trades via PumpPortal.\n\nUse the buttons below or type /help to get started.`;
             ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() });
         });
 
         // Help Command
-        this.bot.help((ctx) => this.sendHelpMessage(ctx));
+        this.bot.help((ctx) => {
+             console.log(`[TELEGRAM] 📥 Received /help command from user: ${ctx.chat.id}`);
+             this.sendHelpMessage(ctx);
+        });
         
-        this.bot.command('help', (ctx) => this.sendHelpMessage(ctx));
+        this.bot.command('help', (ctx) => {
+             console.log(`[TELEGRAM] 📥 Received /help command from user: ${ctx.chat.id}`);
+             this.sendHelpMessage(ctx);
+        });
 
         // Watch Command
         this.bot.command('watch', async (ctx) => {
-            // Expected format: /watch <address>
+            console.log(`[TELEGRAM] 📥 Received /watch command from user: ${ctx.chat.id}`);
             const text = ctx.message.text;
             const parts = text.split(' ');
             
@@ -74,19 +81,23 @@ class TelegramService {
                 const wsService = require('./pumpportal.service');
                 wsService.watchWallet(wallet);
 
+                console.log(`[TELEGRAM] ✅ Successfully added wallet to watch list: ${wallet}`);
                 ctx.reply(`✅ *Successfully watching wallet for copy trades:*\n\`${wallet}\``, { parse_mode: 'Markdown' });
             } catch (err) {
+                console.error(`[TELEGRAM] ❌ Error adding wallet:`, err.message);
                 ctx.reply(`❌ Error adding wallet: ${err.message}`);
             }
         });
 
         // List Command
         this.bot.command('list', async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /list command from user: ${ctx.chat.id}`);
             await this.handleListWallets(ctx);
         });
 
         // Remove Command
         this.bot.command('remove', async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /remove command from user: ${ctx.chat.id}`);
             const text = ctx.message.text;
             const parts = text.split(' ');
             
@@ -98,6 +109,7 @@ class TelegramService {
             const result = await WatchedWallet.deleteOne({ walletAddress: wallet });
             
             if (result.deletedCount > 0) {
+                console.log(`[TELEGRAM] 🗑️ Removed wallet from watch list: ${wallet}`);
                 ctx.reply(`🗑️ Removed wallet from watch list:\n\`${wallet}\``, { parse_mode: 'Markdown' });
             } else {
                 ctx.reply(`⚠️ Wallet not found in watch list.`);
@@ -106,22 +118,26 @@ class TelegramService {
         
         // Simulate Command
         this.bot.command('simulate', (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /simulate command from user: ${ctx.chat.id}`);
             this.handleSimulate(ctx);
         });
     }
 
     registerActions() {
         this.bot.action('action_list', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_list`);
             await ctx.answerCbQuery();
             await this.handleListWallets(ctx);
         });
 
         this.bot.action('action_simulate', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_simulate`);
             await ctx.answerCbQuery();
             this.handleSimulate(ctx);
         });
 
         this.bot.action('action_help', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_help`);
             await ctx.answerCbQuery();
             this.sendHelpMessage(ctx);
         });
@@ -205,8 +221,9 @@ I automatically track Market Cap milestones.
         if (!this.bot) return;
         const channelId = process.env.TELEGRAM_ALERTS_CHANNEL;
         if (channelId) {
+            console.log(`[TELEGRAM] 📤 Dispatching alert to private channel (${channelId})`);
             this.bot.telegram.sendMessage(channelId, message, { parse_mode: 'Markdown' })
-                .catch(err => console.error("<::: Telegram Alert Error:", err.message));
+                .catch(err => console.error("[TELEGRAM] ❌ Alert Error:", err.message));
         }
     }
 }

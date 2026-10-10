@@ -17,9 +17,12 @@ class TradeEngine {
         if(WALLET_PRIVATE_KEY) {
             try {
                 this.myKeypair = Keypair.fromSecretKey(bs58.decode(WALLET_PRIVATE_KEY));
+                console.log("[TRADE-ENGINE] ✅ Wallet Private Key loaded successfully.");
             } catch(e) {
-                console.error("Failed to decode private key", e);
+                console.error("[TRADE-ENGINE] ❌ Failed to decode private key", e.message);
             }
+        } else {
+             console.log("[TRADE-ENGINE] ⚠️ No Wallet Private Key found in .env");
         }
         
         // Caching
@@ -34,14 +37,15 @@ class TradeEngine {
     async updateMyBalance() {
         if(this.myWalletKey) {
             this.myBalance = await solanaService.getSolBalance(this.myWalletKey);
+            console.log(`[TRADE-ENGINE] 💰 Updated local wallet balance: ${this.myBalance} SOL`);
         }
     }
 
     async handleNewToken(msg) {
-        // Message format for create usually has mint, traderPublicKey, initialMarketCap, etc.
         const mint = msg.mint;
-        const initialMC = msg.marketCapSol || 0; // The actual field depends on WS payload, assume marketCapSol
+        const initialMC = msg.marketCapSol || 0; 
         
+        console.log(`[TRADE-ENGINE] 🆕 Registering new token: ${mint} at MC: ${initialMC}`);
         await TokenMetrics.create({
             mint,
             symbol: msg.symbol || 'UNK',
@@ -51,17 +55,12 @@ class TradeEngine {
             milestonesHit: [],
             isRugged: false
         });
-        
-        // Could automatically subscribe to watch this token if it meets certain criteria
     }
 
     async handleTradeEvent(msg) {
-        // msg comes from subscribeAccountTrade OR subscribeTokenTrade
-        // Determine what the message is for
-        
         const trader = msg.traderPublicKey;
         const mint = msg.mint;
-        const mc = msg.marketCapSol; // Check actual payload property names
+        const mc = msg.marketCapSol; 
         const solAmount = msg.solAmount; 
         
         // 1. Update Token MC and check for milestones
@@ -73,6 +72,7 @@ class TradeEngine {
         if(msg.txType === 'buy' && trader) {
             const watched = await WatchedWallet.findOne({ walletAddress: trader, isActive: true });
             if(watched) {
+                console.log(`[TRADE-ENGINE] 🎯 Watched wallet ${trader} bought ${mint}`);
                 await this.executeCopyTrade(msg, watched);
             }
         }
@@ -84,9 +84,8 @@ class TradeEngine {
     }
 
     async updateTokenMilestones(mint, currentMC) {
-        // Find token metrics
         const token = await TokenMetrics.findOne({ mint });
-        if(!token) return; // Not tracked
+        if(!token) return; 
         
         let updated = false;
         if(currentMC > token.highestMCReached) {
@@ -97,6 +96,7 @@ class TradeEngine {
         // Check for new milestones
         for(let ms of this.MILESTONES) {
             if(currentMC >= ms && !token.milestonesHit.includes(ms)) {
+                console.log(`[TRADE-ENGINE] 🚀 Token ${mint} hit milestone: ${ms} MC!`);
                 token.milestonesHit.push(ms);
                 updated = true;
                 
@@ -111,74 +111,58 @@ class TradeEngine {
     }
     
     async evaluateMilestoneSnipe(token, currentMC) {
-        // "If it passes 10k and 20k that means it ready to stay to 50k"
         if(token.milestonesHit.includes(10000) && token.milestonesHit.includes(20000)) {
-            // Did we already buy it?
             const existing = await ActiveTrade.findOne({ mint: token.mint });
             if(!existing) {
-                // Execute Sniper Trade
-                console.log(`:::> Milestones 10k & 20k hit for ${token.mint}. SNIPING to 50k!`);
-                
-                // Determine trade amount (default snipe size e.g. 0.05 SOL or $10 eq)
+                console.log(`[TRADE-ENGINE] 🔫 Milestones 10k & 20k hit for ${token.mint}. Executing SNIPING logic to 50k!`);
                 const tradeAmountSol = 0.05; // Make this configurable
-                
-                // We pass priorityFee high for Sniper
                 await this.executeTradeLocal(token.mint, "buy", tradeAmountSol, true, 0.002, "MILESTONE_SNIPE");
             }
         }
     }
 
     async executeCopyTrade(tradeEvent, watchedWallet) {
-        // Calculate Gain Factor
+        console.log(`[TRADE-ENGINE] 🧮 Calculating Scale Factor for ${watchedWallet.walletAddress}...`);
         const targetWalletBalance = await solanaService.getSolBalance(watchedWallet.walletAddress);
         const spentSol = tradeEvent.solAmount;
         
         await this.updateMyBalance();
         let myTradeSize = 0;
+        let scaleFactor = 0;
         
-        // Fallback Mechanism if RPC fails to return a valid balance for target wallet
         if (!targetWalletBalance || targetWalletBalance <= 0) {
-            console.log(`:::> [FALLBACK] RPC failed to fetch balance for ${watchedWallet.walletAddress}. Using default 5% allocation.`);
-            myTradeSize = this.myBalance * 0.05; // Fallback to 5% of our balance
+            console.log(`[TRADE-ENGINE] ⚠️ [FALLBACK] RPC failed to fetch balance for ${watchedWallet.walletAddress}. Using default 5% allocation.`);
+            myTradeSize = this.myBalance * 0.05; 
         } else if (!spentSol) {
+            console.log(`[TRADE-ENGINE] ℹ️ No SOL spent parsed from event. Skipping copy trade.`);
             return;
         } else {
-            const scaleFactor = spentSol / targetWalletBalance;
+            scaleFactor = spentSol / targetWalletBalance;
             myTradeSize = this.myBalance * scaleFactor;
-            console.log(`:::> Copying trade from ${watchedWallet.walletAddress}. Target spent ${spentSol} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%). Calculated Trade: ${myTradeSize} SOL`);
+            console.log(`[TRADE-ENGINE] ⚖️ Scale Factor: ${(scaleFactor*100).toFixed(2)}% | Calculated Trade: ${myTradeSize} SOL`);
         }
         
         // Safeguards
         if(myTradeSize > this.myBalance * 0.1) {
-            myTradeSize = this.myBalance * 0.1; // Max 10% of portfolio per trade
+            console.log(`[TRADE-ENGINE] 🛡️ Safeguard: Capping trade size to 10% of portfolio.`);
+            myTradeSize = this.myBalance * 0.1; 
         }
         if(myTradeSize < 0.01) {
-            myTradeSize = 0.01; // Minimum trade
+            console.log(`[TRADE-ENGINE] 🛡️ Safeguard: Adjusting trade size to minimum 0.01 SOL.`);
+            myTradeSize = 0.01;
         }
 
-        // Fetch Token details from DB if we have it
+        console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
         const tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
         const mcTracker = tradeEvent.marketCapSol ? `${tradeEvent.marketCapSol.toFixed(2)} SOL` : 'Unknown';
-        
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
 
-        // Notify Telegram Channel
         const telegramService = require('./telegram.service');
-        const alertMsg = `🚨 *Whale Buy Detected!* 🚨
-
-👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})
-🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})
-🏷️ *CA:* \`${tradeEvent.mint}\`
-💰 *Whale Spent:* ${spentSol.toFixed(4)} SOL
-📈 *Current MC:* ${mcTracker}
-
-🗡️ *Razor Bot Execution:*
-*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)
-
-📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        const alertMsg = `🚨 *Whale Buy Detected!* 🚨\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Spent:* ${spentSol.toFixed(4)} SOL\n📈 *Current MC:* ${mcTracker}\n\n🗡️ *Razor Bot Execution:*\n*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
         telegramService.sendAlert(alertMsg);
 
+        console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
     }
 
@@ -187,41 +171,33 @@ class TradeEngine {
         
         for(let trade of activeTrades) {
             if(trade.status === "OPEN") {
-                // Check SL (drops up to 1.2x)
                 if(currentMC <= (trade.entryMarketCap / this.STOP_LOSS_FACTOR)) {
-                    console.log(`:::> Stop Loss Triggered on ${mint} at MC: ${currentMC}`);
+                    console.log(`[TRADE-ENGINE] 🛑 Stop Loss Triggered on ${mint} at MC: ${currentMC}. Executing sell!`);
                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                     continue;
                 }
-                
-                // Check TP (2x)
                 if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
-                    console.log(`:::> Take Profit Triggered on ${mint} at MC: ${currentMC}`);
+                    console.log(`[TRADE-ENGINE] 💸 Take Profit (2x) Triggered on ${mint} at MC: ${currentMC}. Securing profit!`);
                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
-                    // Mark as waiting for reentry
                     trade.status = "TP_TAKEN_WAITING_REENTRY";
                     await trade.save();
                 }
             } else if (trade.status === "REENTERED") {
-                 // Check SL (cannot drop below reentry MC)
                  if(currentMC < trade.entryMarketCap) {
-                     console.log(`:::> Re-entry Stop Loss Triggered on ${mint} at MC: ${currentMC}`);
+                     console.log(`[TRADE-ENGINE] 🛑 Re-entry Stop Loss Triggered on ${mint} at MC: ${currentMC}. Executing sell!`);
                      await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                  }
-                 // Check TP (another 2x from reentry)
                  else if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
-                     console.log(`:::> Re-entry Take Profit Triggered on ${mint}`);
+                     console.log(`[TRADE-ENGINE] 💸 Re-entry Take Profit (2x) Triggered on ${mint}. Securing profit!`);
                      await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
                  }
             }
         }
         
-        // Check trades waiting for re-entry
         const waitingTrades = await ActiveTrade.find({ mint, status: "TP_TAKEN_WAITING_REENTRY" });
         for(let trade of waitingTrades) {
-             // Wait for dip back to exact initial entry MC (or slightly below)
-             if(currentMC <= trade.entryMarketCap * 1.05) { // 5% buffer 
-                 console.log(`:::> Dip detected on ${mint}. Re-entering with 50% initial capital!`);
+             if(currentMC <= trade.entryMarketCap * 1.05) { 
+                 console.log(`[TRADE-ENGINE] 🦅 Dip detected on ${mint}. Re-entering with 50% initial capital at MC: ${currentMC}`);
                  const reEntryAmount = trade.amountSolInvested * 0.5;
                  await this.executeTradeLocal(mint, "buy", reEntryAmount, true, 0.0001, "MILESTONE_SNIPE", null, trade._id, true);
              }
@@ -230,12 +206,12 @@ class TradeEngine {
 
     async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false) {
         if(!this.myKeypair) {
-            console.error("<::: Missing Wallet Private Key. Cannot execute trade.");
+            console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
             return;
         }
         
         try {
-            console.log(`:::> Sending ${action.toUpperCase()} request to PumpPortal for ${mint}`);
+            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} payload to PumpPortal for ${mint}`);
             const response = await axios.post("https://pumpportal.fun/api/trade-local", {
                 publicKey: this.myWalletKey,
                 action,
@@ -248,35 +224,34 @@ class TradeEngine {
             });
             
             if(response.status === 200) {
+                console.log(`[TRADE-ENGINE] 📝 Received raw transaction from PumpPortal. Signing...`);
                 const txBytes = new Uint8Array(response.data);
                 const tx = VersionedTransaction.deserialize(txBytes);
                 tx.sign([this.myKeypair]);
                 
+                console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network...`);
                 const signature = await this.connection.sendTransaction(tx, { maxRetries: 3 });
-                console.log(`:::> Transaction sent! https://solscan.io/tx/${signature}`);
+                console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
                 
-                // Save to DB
                 if(action === "buy") {
                     if(isReentry && tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
                         trade.status = "REENTERED";
-                        // Update entry MC for the new leg
-                        // Need to fetch current MC or use estimation. We will use a mock value here, 
-                        // but normally we get it from WS stream.
                         await trade.save();
+                        console.log(`[TRADE-ENGINE] 🔄 Updated trade state to REENTERED for DB record ${tradeId}`);
                     } else {
                          await ActiveTrade.create({
                             mint,
-                            entryPrice: 0, // Need accurate calc
-                            entryMarketCap: 0, // Updated by WS immediately after
+                            entryPrice: 0,
+                            entryMarketCap: 0, 
                             amountSolInvested: amount,
-                            tokensReceived: 0, // Need to parse tx receipt
+                            tokensReceived: 0,
                             source,
                             mirroredWallet
                         });
+                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade record to DB for tracking TP/SL.`);
                         
-                        // Notify WS to start tracking this token
-                        const wsService = require('./pumpportal.service'); // lazy load to avoid circular deps
+                        const wsService = require('./pumpportal.service');
                         wsService.watchToken(mint);
                     }
                 } else if(action === "sell" && tradeId) {
@@ -285,12 +260,13 @@ class TradeEngine {
                          trade.status = "CLOSED";
                      }
                      await trade.save();
+                     console.log(`[TRADE-ENGINE] 💾 Updated ActiveTrade record status to ${trade.status}.`);
                 }
                 
                 return signature;
             }
         } catch(err) {
-            console.error("<::: Error executing trade", err.response?.data || err.message);
+            console.error("[TRADE-ENGINE] ❌ Error executing trade:", err.response?.data || err.message);
         }
     }
 }
