@@ -27,6 +27,13 @@ class TradeEngine {
         
         // Caching
         this.myBalance = 0;
+        this.tokenCache = new Map(); // In-memory cache to prevent MongoDB flooding
+        
+        // Clear memory cache every 1 hour to prevent memory leaks from 1000s of tokens
+        setInterval(() => {
+            console.log(`[TRADE-ENGINE] 🧹 Clearing in-memory token cache (${this.tokenCache.size} tokens removed).`);
+            this.tokenCache.clear();
+        }, 3600000);
         
         // Constants for logic
         this.MILESTONES = [10000, 20000, 30000, 40000, 50000, 60000, 70000];
@@ -45,8 +52,10 @@ class TradeEngine {
         const mint = msg.mint;
         const initialMC = msg.marketCapSol || 0; 
         
-        console.log(`[TRADE-ENGINE] 🆕 Registering new token: ${mint} at MC: ${initialMC}`);
-        await TokenMetrics.create({
+        console.log(`[TRADE-ENGINE] 🆕 Registering new token in memory cache: ${mint} at MC: ${initialMC}`);
+        
+        // Save to fast in-memory map instead of DB to prevent MongoDB write limit issues
+        this.tokenCache.set(mint, {
             mint,
             symbol: msg.symbol || 'UNK',
             name: msg.name || 'Unknown',
@@ -84,7 +93,10 @@ class TradeEngine {
     }
 
     async updateTokenMilestones(mint, currentMC) {
-        const token = await TokenMetrics.findOne({ mint });
+        let token = this.tokenCache.get(mint);
+        if(!token) {
+            token = await TokenMetrics.findOne({ mint });
+        }
         if(!token) return; 
         
         let updated = false;
@@ -106,7 +118,11 @@ class TradeEngine {
         }
         
         if(updated) {
-            await token.save();
+            if (token.save) {
+                await token.save(); // It's a mongoose document
+            } else {
+                this.tokenCache.set(mint, token); // Update pure JS object in memory
+            }
         }
     }
     
@@ -153,7 +169,10 @@ class TradeEngine {
         }
 
         console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
-        const tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
+        let tokenData = this.tokenCache.get(tradeEvent.mint);
+        if(!tokenData) {
+            tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
+        }
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
         const mcTracker = tradeEvent.marketCapSol ? `${tradeEvent.marketCapSol.toFixed(2)} SOL` : 'Unknown';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
