@@ -156,9 +156,27 @@ class TradeEngine {
             myTradeSize = 0.01; // Minimum trade
         }
 
+        // Fetch Token details from DB if we have it
+        const tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
+        const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
+        const mcTracker = tradeEvent.marketCapSol ? `${tradeEvent.marketCapSol.toFixed(2)} SOL` : 'Unknown';
+        
+        const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
+
         // Notify Telegram Channel
         const telegramService = require('./telegram.service');
-        const alertMsg = `🚨 *Whale Buy Detected!*\n\n*Target Wallet:* \`${watchedWallet.walletAddress}\`\n*Token:* \`${tradeEvent.mint}\`\n*Whale Spent:* ${spentSol} SOL\n\n🗡️ *Razor Bot* is executing a copy-trade of ${myTradeSize.toFixed(4)} SOL!`;
+        const alertMsg = `🚨 *Whale Buy Detected!* 🚨
+
+👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})
+🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})
+🏷️ *CA:* \`${tradeEvent.mint}\`
+💰 *Whale Spent:* ${spentSol.toFixed(4)} SOL
+📈 *Current MC:* ${mcTracker}
+
+🗡️ *Razor Bot Execution:*
+*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)
+
+📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
         telegramService.sendAlert(alertMsg);
 
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
