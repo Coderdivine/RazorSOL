@@ -63,8 +63,13 @@ class TradeEngine {
             initialMC,
             highestMCReached: initialMC,
             milestonesHit: [],
-            isRugged: false
+            isRugged: false,
+            isSavedToDB: false
         });
+
+        // Instruct WebSocket to watch this token so we get MC updates to see if it reaches 7k
+        const wsService = require('./pumpportal.service');
+        wsService.watchToken(mint);
     }
 
     async handleTradeEvent(msg) {
@@ -107,6 +112,27 @@ class TradeEngine {
         }
         
         const currentMC_USD = currentMC * solanaService.getSolPriceUSD();
+
+        // 🚨 NEW LOGIC: Only save new tokens to permanent DB if they hit $7,000 MC 🚨
+        if(currentMC_USD >= 7000 && !token.isSavedToDB) {
+            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $7k MC! Saving to permanent DB watchlist.`);
+            token.isSavedToDB = true;
+            updated = true;
+            try {
+                // If it already exists it will throw dup error, which is fine to catch and ignore
+                await TokenMetrics.create({
+                    mint: token.mint,
+                    symbol: token.symbol,
+                    name: token.name,
+                    initialMC: token.initialMC,
+                    highestMCReached: currentMC,
+                    milestonesHit: token.milestonesHit,
+                    isRugged: false
+                });
+            } catch (e) {
+                // Ignore duplicate keys if multiple trades fire concurrently at 7k
+            }
+        }
         
         // Check for new milestones
         for(let ms of this.MILESTONES) {

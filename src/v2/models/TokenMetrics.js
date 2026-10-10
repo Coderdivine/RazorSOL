@@ -36,4 +36,7 @@ const TokenMetricsSchema = new Schema(
   { timestamps: true }
 );
 
+// TTL Index: Automatically delete documents 90 days (7776000 seconds) after creation
+TokenMetricsSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
+
 module.exports = mongoose.model("TokenMetrics", TokenMetricsSchema);

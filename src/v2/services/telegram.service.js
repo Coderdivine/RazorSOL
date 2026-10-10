@@ -29,7 +29,7 @@ class TelegramService {
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
-            [Markup.button.callback('📜 List Watched Wallets', 'action_list')],
+            [Markup.button.callback('📜 List Watched Wallets', 'action_list'), Markup.button.callback('📊 View Stats', 'action_stats')],
             [Markup.button.callback('🧪 Run Simulation', 'action_simulate')],
             [Markup.button.callback('❓ Help & Instructions', 'action_help')]
         ]);
@@ -52,6 +52,12 @@ class TelegramService {
         this.bot.command('help', (ctx) => {
              console.log(`[TELEGRAM] 📥 Received /help command from user: ${ctx.chat.id}`);
              this.sendHelpMessage(ctx);
+        });
+
+        // Stats Command
+        this.bot.command('stats', (ctx) => {
+             console.log(`[TELEGRAM] 📥 Received /stats command from user: ${ctx.chat.id}`);
+             this.handleStats(ctx);
         });
 
         // Watch Command
@@ -141,6 +147,32 @@ class TelegramService {
             await ctx.answerCbQuery();
             this.sendHelpMessage(ctx);
         });
+
+        this.bot.action('action_stats', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats`);
+            await ctx.answerCbQuery();
+            this.handleStats(ctx);
+        });
+    }
+
+    async handleStats(ctx) {
+        try {
+            const statsService = require('./stats.service');
+            const stats = await statsService.getStats();
+            
+            const caption = `📊 *Razor Bot Performance Analytics*\n\n` +
+                            `👁️ *Watched Wallets:* ${stats.totalWatched}\n` +
+                            `🔄 *Total Trades:* ${stats.totalTrades}\n` +
+                            `🟢 *Open Trades:* ${stats.openCount}\n` +
+                            `🔴 *Closed Trades:* ${stats.closedCount}\n` +
+                            `💰 *Estimated PnL:* ${stats.totalPnlSol.toFixed(4)} SOL\n\n` +
+                            `Here is your generated PnL chart:`;
+                            
+            await ctx.replyWithPhoto({ url: stats.chartUrl }, { caption, parse_mode: 'Markdown' });
+        } catch (err) {
+            console.error("[TELEGRAM] ❌ Error generating stats:", err);
+            ctx.reply("❌ Error generating stats dashboard.");
+        }
     }
 
     sendHelpMessage(ctx) {
