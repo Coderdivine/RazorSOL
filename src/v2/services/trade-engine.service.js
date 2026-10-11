@@ -113,9 +113,9 @@ class TradeEngine {
         
         const currentMC_USD = currentMC * solanaService.getSolPriceUSD();
 
-        // 🚨 NEW LOGIC: Only save new tokens to permanent DB if they hit $7,000 MC 🚨
-        if(currentMC_USD >= 7000 && !token.isSavedToDB) {
-            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $7k MC! Saving to permanent DB watchlist.`);
+        // 🚨 NEW LOGIC: Only save new tokens to permanent DB if they hit $5,000 MC 🚨
+        if(currentMC_USD >= 5000 && !token.isSavedToDB) {
+            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $5k MC! Saving to permanent DB watchlist.`);
             token.isSavedToDB = true;
             updated = true;
             try {
@@ -130,7 +130,7 @@ class TradeEngine {
                     isRugged: false
                 });
             } catch (e) {
-                // Ignore duplicate keys if multiple trades fire concurrently at 7k
+                // Ignore duplicate keys if multiple trades fire concurrently at 5k
             }
         }
         

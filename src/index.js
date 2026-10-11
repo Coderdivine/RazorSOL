@@ -34,7 +34,7 @@ app.get('/health', (req, res) => {
 
 app.use("/", apiLimiter);
 
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   require("./v2/database/mongo");
   console.log(`:::> Server listening on port ${PORT} http://localhost:${PORT}`);
   
@@ -45,8 +45,15 @@ app.listen(PORT, async () => {
   }, 3000);
 });
 
-app.on("error", (error) => {
-  console.error(`<::: An error occurred on the server: \n ${error}`);
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`\n[SERVER] 🚨 Error: Port ${PORT} is already in use by another running instance.`);
+    console.error(`[SERVER] 💡 To free this port automatically, run: lsof -ti :${PORT} | xargs kill -9\n`);
+    process.exit(1);
+  } else {
+    console.error(`<::: An error occurred on the server: \n`, error);
+    process.exit(1);
+  }
 });
 
 module.exports = app;

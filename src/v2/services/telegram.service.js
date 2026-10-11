@@ -20,18 +20,33 @@ class TelegramService {
         this.registerActions();
         
         // Launch the bot gracefully
-        this.bot.launch();
+        this.bot.launch().catch(err => {
+            console.error("[TELEGRAM] ❌ Failed to launch bot:", err.message);
+        });
 
         // Enable graceful stop
-        process.once('SIGINT', () => this.bot.stop('SIGINT'));
-        process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
+        process.once('SIGINT', () => this.bot && this.bot.stop('SIGINT'));
+        process.once('SIGTERM', () => this.bot && this.bot.stop('SIGTERM'));
     }
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
             [Markup.button.callback('📜 List Watched Wallets', 'action_list'), Markup.button.callback('📊 View Stats', 'action_stats')],
-            [Markup.button.callback('🧪 Run Simulation', 'action_simulate')],
             [Markup.button.callback('❓ Help & Instructions', 'action_help')]
+        ]);
+    }
+
+    getStatsButtons(currentTimeframe = '1d') {
+        const btn1d = currentTimeframe === '1d' ? '• 1D •' : '1D';
+        const btn1w = currentTimeframe === '1w' ? '• 1W •' : '1W';
+        const btn1m = currentTimeframe === '1m' ? '• 1M •' : '1M';
+        return Markup.inlineKeyboard([
+            [
+                Markup.button.callback(btn1d, 'action_stats_1d'),
+                Markup.button.callback(btn1w, 'action_stats_1w'),
+                Markup.button.callback(btn1m, 'action_stats_1m')
+            ],
+            [Markup.button.callback('🔄 Refresh Stats', `action_stats_${currentTimeframe}`)]
         ]);
     }
 
@@ -39,7 +54,7 @@ class TelegramService {
         // Start Command
         this.bot.start((ctx) => {
             console.log(`[TELEGRAM] 📥 Received /start command from user: ${ctx.chat.id}`);
-            const msg = `Welcome to *Razor Trading Bot* 🗡️\n\nI am running 24/7 on Render to monitor Solana meme tokens and execute precision trades via PumpPortal.\n\nUse the buttons below or type /help to get started.`;
+            const msg = `Welcome to *Razor Trading Bot* 🗡️\n\nI am running 24/7 to monitor Solana meme tokens, auto-snipe tokens crossing milestone Market Caps, and mirror whale trades in real-time.\n\nUse the buttons below or type /help to get started.`;
             ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() });
         });
 
@@ -57,7 +72,7 @@ class TelegramService {
         // Stats Command
         this.bot.command('stats', (ctx) => {
              console.log(`[TELEGRAM] 📥 Received /stats command from user: ${ctx.chat.id}`);
-             this.handleStats(ctx);
+             this.handleStats(ctx, '1d');
         });
 
         // Watch Command
@@ -121,12 +136,6 @@ class TelegramService {
                 ctx.reply(`⚠️ Wallet not found in watch list.`);
             }
         });
-        
-        // Simulate Command
-        this.bot.command('simulate', (ctx) => {
-            console.log(`[TELEGRAM] 📥 Received /simulate command from user: ${ctx.chat.id}`);
-            this.handleSimulate(ctx);
-        });
     }
 
     registerActions() {
@@ -134,12 +143,6 @@ class TelegramService {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_list`);
             await ctx.answerCbQuery();
             await this.handleListWallets(ctx);
-        });
-
-        this.bot.action('action_simulate', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_simulate`);
-            await ctx.answerCbQuery();
-            this.handleSimulate(ctx);
         });
 
         this.bot.action('action_help', async (ctx) => {
@@ -151,27 +154,53 @@ class TelegramService {
         this.bot.action('action_stats', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats`);
             await ctx.answerCbQuery();
-            this.handleStats(ctx);
+            this.handleStats(ctx, '1d');
+        });
+
+        this.bot.action('action_stats_1d', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1d`);
+            await ctx.answerCbQuery('Loading 1D stats...');
+            this.handleStats(ctx, '1d');
+        });
+
+        this.bot.action('action_stats_1w', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1w`);
+            await ctx.answerCbQuery('Loading 1W stats...');
+            this.handleStats(ctx, '1w');
+        });
+
+        this.bot.action('action_stats_1m', async (ctx) => {
+            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1m`);
+            await ctx.answerCbQuery('Loading 1M stats...');
+            this.handleStats(ctx, '1m');
         });
     }
 
-    async handleStats(ctx) {
+    async handleStats(ctx, timeframe = '1d') {
         try {
             const statsService = require('./stats.service');
-            const stats = await statsService.getStats();
+            const stats = await statsService.getStats(timeframe);
             
-            const caption = `📊 *Razor Bot Performance Analytics*\n\n` +
+            const caption = `📊 *Razor Bot Performance Analytics*\n` +
+                            `⏱️ *Timeframe:* ${stats.timeframeLabel}\n\n` +
                             `👁️ *Watched Wallets:* ${stats.totalWatched}\n` +
                             `🔄 *Total Trades:* ${stats.totalTrades}\n` +
                             `🟢 *Open Trades:* ${stats.openCount}\n` +
                             `🔴 *Closed Trades:* ${stats.closedCount}\n` +
                             `💰 *Estimated PnL:* ${stats.totalPnlSol.toFixed(4)} SOL\n\n` +
-                            `Here is your generated PnL chart:`;
+                            `_Generated performance chart below:_`;
                             
-            await ctx.replyWithPhoto({ url: stats.chartUrl }, { caption, parse_mode: 'Markdown' });
+            const keyboard = this.getStatsButtons(timeframe);
+
+            try {
+                await ctx.replyWithPhoto({ url: stats.chartUrl }, { caption, parse_mode: 'Markdown', ...keyboard });
+            } catch (photoErr) {
+                console.warn("[TELEGRAM] ⚠️ replyWithPhoto failed, falling back to text reply:", photoErr.message);
+                await ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard });
+            }
         } catch (err) {
-            console.error("[TELEGRAM] ❌ Error generating stats:", err);
-            ctx.reply("❌ Error generating stats dashboard.");
+            console.error("[TELEGRAM] ❌ Error generating stats:", err.message);
+            ctx.reply("❌ Error retrieving analytics data.");
         }
     }
 
@@ -179,10 +208,10 @@ class TelegramService {
         const helpText = `
 *Razor Bot Help & Commands* 📖
 
-Here is a detailed breakdown of what I can do:
+Here is a detailed breakdown of all available commands:
 
 🔸 \`/watch <wallet_address>\`
-Adds a target wallet to the active monitor list. The bot instantly hooks into the PumpPortal Websocket to track its buys. When it buys, we calculate its **Gain Factor** and mirror the trade proportionately!
+Adds a target whale wallet to the active monitor list. When this wallet buys a token on PumpPortal, Razor calculates its **Gain Factor** and mirrors the trade proportionately!
 
 🔸 \`/remove <wallet_address>\`
 Stops monitoring a specific wallet and removes it from the database.
@@ -190,13 +219,14 @@ Stops monitoring a specific wallet and removes it from the database.
 🔸 \`/list\`
 Displays all the wallets you are currently tracking.
 
-🔸 \`/simulate\`
-Runs a financial breakdown based on 20 simulated trades using real network and API fees, showing you the exact cost difference between $10 and $100 normal trades vs. high-speed sniper trades.
+🔸 \`/stats\`
+Displays real-time performance analytics (Total Trades, Open/Closed positions, PnL) along with a generated visual performance chart across 1D, 1W, and 1M timeframes.
 
-*Anti-Rug & TP/SL Logic:*
-I automatically track Market Cap milestones.
+*Sniper & Anti-Rug Strategy:*
+• **Auto-Watch Threshold:** Only new tokens reaching >$5k Market Cap are added to permanent watchlist.
+• **Milestone Snipe:** Automatically snipes tokens breaking the 10k -> 20k -> 50k progression.
 • **Stop Loss:** Sells instantly if the coin drops 20% (1.2x).
-• **Take Profit:** Automatically sells at 2x. I will secure the profit and can be configured to leave a moonbag (70/30 split).
+• **Take Profit:** Automatically sells at 2x to secure your capital.
         `;
         ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getMenuButtons() });
     }
@@ -214,39 +244,6 @@ I automatically track Market Cap milestones.
         
         response += `\nTo remove one, type \`/remove <wallet_address>\``;
         ctx.reply(response, { parse_mode: 'Markdown' });
-    }
-
-    async handleSimulate(ctx) {
-        // Send a real-time message indicating it's running
-        const waitingMsg = await ctx.reply("⚙️ *Running real-time simulation...* Please wait while I calculate network fees and profit metrics.", { parse_mode: "Markdown" });
-        
-        // Wait 3 seconds to simulate calculation
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        const simulationText = `
-🧪 *Profit vs Gas Simulation (20 Trades)*
-
-*$10 Base Size (Total $200):*
-- PumpPortal Fees (0.5% in/out): ~$20.00
-- Sniper Gas Fees: ~$14.00
-- Net Profit required to breakeven: ~17% per trade.
-- *Verdict: Sniper mode cuts heavily into $10 margins. Best to use 100% TP at 2x.*
-
-*$100 Base Size (Total $2000):*
-- PumpPortal Fees: ~$200.00
-- Sniper Gas Fees: ~$14.00
-- Net Profit required to breakeven: ~10% per trade.
-- *Verdict: 70/30 TP strategy recommended to leave moonbags.*
-        `;
-        
-        // Update the waiting message with the results
-        ctx.telegram.editMessageText(
-            ctx.chat.id, 
-            waitingMsg.message_id, 
-            null, 
-            simulationText, 
-            { parse_mode: "Markdown" }
-        );
     }
 
     sendAlert(message) {
