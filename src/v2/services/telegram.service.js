@@ -196,13 +196,32 @@ class TelegramService {
                             `_Generated performance chart below:_`;
                             
             const keyboard = this.getStatsButtons(timeframe);
+            const photoInput = stats.chartBuffer ? { source: stats.chartBuffer } : { url: stats.chartUrl };
+
+            // If triggered by an inline button on an existing photo message, edit in-place
+            if (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.photo) {
+                try {
+                    await ctx.editMessageMedia(
+                        {
+                            type: 'photo',
+                            media: photoInput,
+                            caption,
+                            parse_mode: 'Markdown'
+                        },
+                        keyboard
+                    );
+                    return;
+                } catch (editErr) {
+                    console.warn("[TELEGRAM] ⚠️ editMessageMedia failed, falling back to new photo:", editErr.message);
+                }
+            }
 
             try {
-                await ctx.replyWithPhoto({ url: stats.chartUrl }, { caption, parse_mode: 'Markdown', ...keyboard });
+                await ctx.replyWithPhoto(photoInput, { caption, parse_mode: 'Markdown', ...keyboard });
             } catch (photoErr) {
                 console.warn("[TELEGRAM] ⚠️ replyWithPhoto failed, falling back to text reply:", photoErr.message);
                 await ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard }).catch(e => {
-                    console.warn("[TELEGRAM] ⚠️ Fallback text reply also encountered network glitch:", e.message);
+                    console.warn("[TELEGRAM] ⚠️ Fallback text reply error:", e.message);
                 });
             }
         } catch (err) {

@@ -1,9 +1,15 @@
 const ActiveTrade = require('../models/ActiveTrade');
 const WatchedWallet = require('../models/WatchedWallet');
+const QuickChart = require('quickchart-js');
 
 class StatsService {
     async getStats(timeframe = '1d') {
-        const totalWatched = await WatchedWallet.countDocuments({ isActive: true });
+        let totalWatched = 0;
+        try {
+            totalWatched = await WatchedWallet.countDocuments({ isActive: true });
+        } catch (e) {
+            console.warn('[STATS] ⚠️ Could not count watched wallets:', e.message);
+        }
         
         // Timeframe filter calculation
         const now = new Date();
@@ -16,7 +22,13 @@ class StatsService {
             startTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
         }
 
-        const allTrades = await ActiveTrade.find({ createdAt: { $gte: startTime } });
+        let allTrades = [];
+        try {
+            allTrades = await ActiveTrade.find({ createdAt: { $gte: startTime } });
+        } catch (e) {
+            console.warn('[STATS] ⚠️ Could not fetch active trades:', e.message);
+        }
+
         const openTrades = allTrades.filter(t => t.status === 'OPEN' || t.status === 'REENTERED' || t.status === 'TP_TAKEN_WAITING_REENTRY');
         const closedTrades = allTrades.filter(t => t.status === 'CLOSED');
 
@@ -81,7 +93,20 @@ class StatsService {
             }
         };
 
-        const chartUrl = `https://quickchart.io/chart?bkg=%23111827&w=600&h=350&c=${encodeURIComponent(JSON.stringify(chartConfig))}`;
+        const chart = new QuickChart();
+        chart.setConfig(chartConfig);
+        chart.setWidth(600);
+        chart.setHeight(350);
+        chart.setBackgroundColor('#111827');
+
+        let chartBuffer = null;
+        try {
+            chartBuffer = await chart.toBinary();
+        } catch (err) {
+            console.warn('[STATS] ⚠️ QuickChart toBinary failed:', err.message);
+        }
+
+        const chartUrl = chart.getUrl();
 
         return {
             timeframe,
@@ -91,6 +116,7 @@ class StatsService {
             openCount: openTrades.length,
             closedCount: closedTrades.length,
             totalPnlSol,
+            chartBuffer,
             chartUrl
         };
     }
