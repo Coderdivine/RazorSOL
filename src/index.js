@@ -3,7 +3,15 @@ const app = require("express")();
 require("./v2/middlewares/pre-route.middleware")(app);
 app.use(require("./v2/routes"));
 require("./v2/middlewares/error.middleware")(app);
-const PORT = process.env.PORT || 5001;
+// Process-level safety handlers to prevent network glitches (ECONNRESET, ETIMEDOUT) from crashing the server
+process.on('unhandledRejection', (reason) => {
+  console.warn('[PROCESS] ⚠️ Handled Unhandled Rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.warn('[PROCESS] ⚠️ Handled Uncaught Exception:', err?.message || err);
+});
+
+const PORT = process.env.PORT || 2059;
 const cookieSession = require("cookie-session");
 const rateLimit = require('express-rate-limit');
 const useragent = require('express-useragent');

@@ -16,6 +16,11 @@ class TelegramService {
         this.bot = new Telegraf(TELEGRAM_BOT_TOKEN);
         console.log("[TELEGRAM] 🤖 Telegram Bot Controller initialized.");
 
+        // Centralized error handler to prevent transient network errors (ECONNRESET, ETIMEDOUT) from crashing the server
+        this.bot.catch((err, ctx) => {
+            console.warn(`[TELEGRAM] ⚠️ Handled Telegraf network/API error for ${ctx?.updateType || 'operation'}:`, err.message);
+        });
+
         this.registerCommands();
         this.registerActions();
         
@@ -55,7 +60,7 @@ class TelegramService {
         this.bot.start((ctx) => {
             console.log(`[TELEGRAM] 📥 Received /start command from user: ${ctx.chat.id}`);
             const msg = `Welcome to *Razor Trading Bot* 🗡️\n\nI am running 24/7 to monitor Solana meme tokens, auto-snipe tokens crossing milestone Market Caps, and mirror whale trades in real-time.\n\nUse the buttons below or type /help to get started.`;
-            ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() });
+            ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Start reply error:", e.message));
         });
 
         // Help Command
@@ -82,7 +87,7 @@ class TelegramService {
             const parts = text.split(' ');
             
             if(parts.length < 2) {
-                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/watch <wallet_address>`', { parse_mode: 'Markdown' });
+                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/watch <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
             }
             
             const wallet = parts[1];
@@ -90,7 +95,7 @@ class TelegramService {
             try {
                 const existing = await WatchedWallet.findOne({ walletAddress: wallet });
                 if (existing) {
-                    return ctx.reply(`⚠️ Wallet \`${wallet}\` is already being watched.`, { parse_mode: 'Markdown' });
+                    return ctx.reply(`⚠️ Wallet \`${wallet}\` is already being watched.`, { parse_mode: 'Markdown' }).catch(() => {});
                 }
 
                 await WatchedWallet.create({
@@ -103,10 +108,10 @@ class TelegramService {
                 wsService.watchWallet(wallet);
 
                 console.log(`[TELEGRAM] ✅ Successfully added wallet to watch list: ${wallet}`);
-                ctx.reply(`✅ *Successfully watching wallet for copy trades:*\n\`${wallet}\``, { parse_mode: 'Markdown' });
+                ctx.reply(`✅ *Successfully watching wallet for copy trades:*\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
             } catch (err) {
                 console.error(`[TELEGRAM] ❌ Error adding wallet:`, err.message);
-                ctx.reply(`❌ Error adding wallet: ${err.message}`);
+                ctx.reply(`❌ Error adding wallet: ${err.message}`).catch(() => {});
             }
         });
 
@@ -123,7 +128,7 @@ class TelegramService {
             const parts = text.split(' ');
             
             if(parts.length < 2) {
-                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/remove <wallet_address>`', { parse_mode: 'Markdown' });
+                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/remove <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
             }
             
             const wallet = parts[1];
@@ -131,9 +136,9 @@ class TelegramService {
             
             if (result.deletedCount > 0) {
                 console.log(`[TELEGRAM] 🗑️ Removed wallet from watch list: ${wallet}`);
-                ctx.reply(`🗑️ Removed wallet from watch list:\n\`${wallet}\``, { parse_mode: 'Markdown' });
+                ctx.reply(`🗑️ Removed wallet from watch list:\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
             } else {
-                ctx.reply(`⚠️ Wallet not found in watch list.`);
+                ctx.reply(`⚠️ Wallet not found in watch list.`).catch(() => {});
             }
         });
     }
@@ -141,37 +146,37 @@ class TelegramService {
     registerActions() {
         this.bot.action('action_list', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_list`);
-            await ctx.answerCbQuery();
+            await ctx.answerCbQuery().catch(() => {});
             await this.handleListWallets(ctx);
         });
 
         this.bot.action('action_help', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_help`);
-            await ctx.answerCbQuery();
+            await ctx.answerCbQuery().catch(() => {});
             this.sendHelpMessage(ctx);
         });
 
         this.bot.action('action_stats', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats`);
-            await ctx.answerCbQuery();
+            await ctx.answerCbQuery().catch(() => {});
             this.handleStats(ctx, '1d');
         });
 
         this.bot.action('action_stats_1d', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1d`);
-            await ctx.answerCbQuery('Loading 1D stats...');
+            await ctx.answerCbQuery('Loading 1D stats...').catch(() => {});
             this.handleStats(ctx, '1d');
         });
 
         this.bot.action('action_stats_1w', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1w`);
-            await ctx.answerCbQuery('Loading 1W stats...');
+            await ctx.answerCbQuery('Loading 1W stats...').catch(() => {});
             this.handleStats(ctx, '1w');
         });
 
         this.bot.action('action_stats_1m', async (ctx) => {
             console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1m`);
-            await ctx.answerCbQuery('Loading 1M stats...');
+            await ctx.answerCbQuery('Loading 1M stats...').catch(() => {});
             this.handleStats(ctx, '1m');
         });
     }
@@ -196,11 +201,13 @@ class TelegramService {
                 await ctx.replyWithPhoto({ url: stats.chartUrl }, { caption, parse_mode: 'Markdown', ...keyboard });
             } catch (photoErr) {
                 console.warn("[TELEGRAM] ⚠️ replyWithPhoto failed, falling back to text reply:", photoErr.message);
-                await ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard });
+                await ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard }).catch(e => {
+                    console.warn("[TELEGRAM] ⚠️ Fallback text reply also encountered network glitch:", e.message);
+                });
             }
         } catch (err) {
             console.error("[TELEGRAM] ❌ Error generating stats:", err.message);
-            ctx.reply("❌ Error retrieving analytics data.");
+            ctx.reply("❌ Error retrieving analytics data.").catch(() => {});
         }
     }
 
@@ -228,13 +235,13 @@ Displays real-time performance analytics (Total Trades, Open/Closed positions, P
 • **Stop Loss:** Sells instantly if the coin drops 20% (1.2x).
 • **Take Profit:** Automatically sells at 2x to secure your capital.
         `;
-        ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getMenuButtons() });
+        ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Help reply error:", e.message));
     }
 
     async handleListWallets(ctx) {
         const wallets = await WatchedWallet.find({ isActive: true });
         if (wallets.length === 0) {
-            return ctx.reply(`No wallets are currently being watched.`);
+            return ctx.reply(`No wallets are currently being watched.`).catch(() => {});
         }
         
         let response = `👁️ *Watched Wallets:*\n\n`;
@@ -243,7 +250,7 @@ Displays real-time performance analytics (Total Trades, Open/Closed positions, P
         });
         
         response += `\nTo remove one, type \`/remove <wallet_address>\``;
-        ctx.reply(response, { parse_mode: 'Markdown' });
+        ctx.reply(response, { parse_mode: 'Markdown' }).catch(() => {});
     }
 
     sendAlert(message) {
