@@ -25,16 +25,21 @@ class TelegramService {
         this.registerCommands();
         this.registerActions();
 
-        // Register Telegram Command Auto-Suggestions (shown as user types '/')
+        // Register Telegram Command Auto-Suggestions across all scopes (shown as user types '/')
         try {
-            await this.bot.telegram.setMyCommands([
+            const commands = [
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
                 { command: 'list', description: '👁️ View Active Monitored Whale Wallets' },
                 { command: 'watch', description: '🎯 Mirror a Whale: /watch <address>' },
                 { command: 'remove', description: '🗑️ Stop Monitoring: /remove <address>' },
                 { command: 'help', description: '📖 Interactive Strategy & Control Guide' }
-            ]);
-            console.log("[TELEGRAM] ✅ Command auto-suggestions registered successfully.");
+            ];
+
+            await this.bot.telegram.setMyCommands(commands, { scope: { type: 'default' } });
+            await this.bot.telegram.setMyCommands(commands, { scope: { type: 'all_private_chats' } });
+            await this.bot.telegram.setMyCommands(commands, { scope: { type: 'all_group_chats' } });
+            await this.bot.telegram.setChatMenuButton({ menu_button: { type: 'commands' } });
+            console.log("[TELEGRAM] ✅ Command auto-suggestions and menu button registered across all scopes.");
         } catch (e) {
             console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
         }
