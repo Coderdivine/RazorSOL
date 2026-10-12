@@ -1,13 +1,14 @@
 const { Telegraf, Markup } = require('telegraf');
 const WatchedWallet = require('../models/WatchedWallet');
-const { TELEGRAM_BOT_TOKEN } = process.env;
+const solanaService = require('./solana.service');
+const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY } = process.env;
 
 class TelegramService {
     constructor() {
         this.bot = null;
     }
 
-    init() {
+    async init() {
         if (!TELEGRAM_BOT_TOKEN) {
             console.log("[TELEGRAM] ⚠️ No Telegram Bot Token found. Telegram controller disabled.");
             return;
@@ -23,6 +24,20 @@ class TelegramService {
 
         this.registerCommands();
         this.registerActions();
+
+        // Register Telegram Command Auto-Suggestions (shown as user types '/')
+        try {
+            await this.bot.telegram.setMyCommands([
+                { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
+                { command: 'list', description: '👁️ View Active Monitored Whale Wallets' },
+                { command: 'watch', description: '🎯 Mirror a Whale: /watch <address>' },
+                { command: 'remove', description: '🗑️ Stop Monitoring: /remove <address>' },
+                { command: 'help', description: '📖 Interactive Strategy & Control Guide' }
+            ]);
+            console.log("[TELEGRAM] ✅ Command auto-suggestions registered successfully.");
+        } catch (e) {
+            console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
+        }
         
         // Launch the bot gracefully
         this.bot.launch().catch(err => {
@@ -36,22 +51,33 @@ class TelegramService {
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
-            [Markup.button.callback('📜 List Watched Wallets', 'action_list'), Markup.button.callback('📊 View Stats', 'action_stats')],
-            [Markup.button.callback('❓ Help & Instructions', 'action_help')]
+            [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
+            [Markup.button.callback('📖 Strategy & Architecture Guide', 'action_help')]
         ]);
     }
 
     getStatsButtons(currentTimeframe = '1d') {
-        const btn1d = currentTimeframe === '1d' ? '• 1D •' : '1D';
-        const btn1w = currentTimeframe === '1w' ? '• 1W •' : '1W';
-        const btn1m = currentTimeframe === '1m' ? '• 1M •' : '1M';
+        const btn1d = currentTimeframe === '1d' ? '• 24H •' : '24H';
+        const btn1w = currentTimeframe === '1w' ? '• 7D •' : '7D';
+        const btn1m = currentTimeframe === '1m' ? '• 30D •' : '30D';
         return Markup.inlineKeyboard([
             [
                 Markup.button.callback(btn1d, 'action_stats_1d'),
                 Markup.button.callback(btn1w, 'action_stats_1w'),
                 Markup.button.callback(btn1m, 'action_stats_1m')
             ],
-            [Markup.button.callback('🔄 Refresh Stats', `action_stats_${currentTimeframe}`)]
+            [
+                Markup.button.callback('🔄 Refresh Data', `action_stats_${currentTimeframe}`),
+                Markup.button.callback('📖 Help Guide', 'action_help')
+            ]
+        ]);
+    }
+
+    getHelpCategoryButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('🎯 Copy Trading Engine', 'help_cat_copy'), Markup.button.callback('🔫 5K Milestone Sniper', 'help_cat_sniper')],
+            [Markup.button.callback('🛡️ Risk & Anti-Rug Guard', 'help_cat_risk'), Markup.button.callback('💼 Wallet Management', 'help_cat_wallets')],
+            [Markup.button.callback('📊 Analytics Terminal', 'help_cat_stats'), Markup.button.callback('⚡ Main Dashboard', 'action_stats')]
         ]);
     }
 
@@ -59,7 +85,12 @@ class TelegramService {
         // Start Command
         this.bot.start((ctx) => {
             console.log(`[TELEGRAM] 📥 Received /start command from user: ${ctx.chat.id}`);
-            const msg = `Welcome to *Razor Trading Bot* 🗡️\n\nI am running 24/7 to monitor Solana meme tokens, auto-snipe tokens crossing milestone Market Caps, and mirror whale trades in real-time.\n\nUse the buttons below or type /help to get started.`;
+            const msg = `⚡ *RAZOR SOLANA TRADING TERMINAL*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Institutional-grade copy-trading, 5K milestone sniping, and autonomous bonding curve execution.\n\n` +
+                        `• *Engine Status:* 🟢 Active 24/7\n` +
+                        `• *Trading Wallet:* \`${WALLET_PUBLIC_KEY}\`\n\n` +
+                        `Select an option below or type \`/\` to see available commands:`;
             ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Start reply error:", e.message));
         });
 
@@ -90,12 +121,12 @@ class TelegramService {
                 return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/watch <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
             }
             
-            const wallet = parts[1];
+            const wallet = parts[1].trim();
 
             try {
                 const existing = await WatchedWallet.findOne({ walletAddress: wallet });
                 if (existing) {
-                    return ctx.reply(`⚠️ Wallet \`${wallet}\` is already being watched.`, { parse_mode: 'Markdown' }).catch(() => {});
+                    return ctx.reply(`⚠️ Wallet \`${wallet}\` is already in your active watch list.`, { parse_mode: 'Markdown' }).catch(() => {});
                 }
 
                 await WatchedWallet.create({
@@ -103,12 +134,12 @@ class TelegramService {
                     addedBy: ctx.chat.id.toString()
                 });
 
-                // Dynamically subscribe in websocket
+                // Dynamically subscribe on both PumpPortal and Solana RPC
                 const wsService = require('./pumpportal.service');
                 wsService.watchWallet(wallet);
 
                 console.log(`[TELEGRAM] ✅ Successfully added wallet to watch list: ${wallet}`);
-                ctx.reply(`✅ *Successfully watching wallet for copy trades:*\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
+                ctx.reply(`🎯 *Target Wallet Added to Dual-Engine Monitor:*\n\`${wallet}\`\n\n_Razor will mirror buys proportionally in real-time._`, { parse_mode: 'Markdown' }).catch(() => {});
             } catch (err) {
                 console.error(`[TELEGRAM] ❌ Error adding wallet:`, err.message);
                 ctx.reply(`❌ Error adding wallet: ${err.message}`).catch(() => {});
@@ -131,144 +162,189 @@ class TelegramService {
                 return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/remove <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
             }
             
-            const wallet = parts[1];
+            const wallet = parts[1].trim();
             const result = await WatchedWallet.deleteOne({ walletAddress: wallet });
             
             if (result.deletedCount > 0) {
                 console.log(`[TELEGRAM] 🗑️ Removed wallet from watch list: ${wallet}`);
-                ctx.reply(`🗑️ Removed wallet from watch list:\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
+                ctx.reply(`🗑️ Untracked wallet:\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
             } else {
-                ctx.reply(`⚠️ Wallet not found in watch list.`).catch(() => {});
+                ctx.reply(`⚠️ Wallet not found in active watch list.`).catch(() => {});
             }
         });
     }
 
     registerActions() {
         this.bot.action('action_list', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_list`);
             await ctx.answerCbQuery().catch(() => {});
             await this.handleListWallets(ctx);
         });
 
         this.bot.action('action_help', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_help`);
             await ctx.answerCbQuery().catch(() => {});
             this.sendHelpMessage(ctx);
         });
 
         this.bot.action('action_stats', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats`);
-            await ctx.answerCbQuery().catch(() => {});
+            await ctx.answerCbQuery('Fetching live terminal metrics...').catch(() => {});
             this.handleStats(ctx, '1d');
         });
 
         this.bot.action('action_stats_1d', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1d`);
-            await ctx.answerCbQuery('Loading 1D stats...').catch(() => {});
+            await ctx.answerCbQuery('Loading 24H Window...').catch(() => {});
             this.handleStats(ctx, '1d');
         });
 
         this.bot.action('action_stats_1w', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1w`);
-            await ctx.answerCbQuery('Loading 1W stats...').catch(() => {});
+            await ctx.answerCbQuery('Loading 7D Window...').catch(() => {});
             this.handleStats(ctx, '1w');
         });
 
         this.bot.action('action_stats_1m', async (ctx) => {
-            console.log(`[TELEGRAM] 🔘 Inline button clicked: action_stats_1m`);
-            await ctx.answerCbQuery('Loading 1M stats...').catch(() => {});
+            await ctx.answerCbQuery('Loading 30D Window...').catch(() => {});
             this.handleStats(ctx, '1m');
+        });
+
+        // Help Categories
+        this.bot.action('help_cat_copy', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text = `🎯 *COPY TRADING ENGINE*\n` +
+                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `Razor monitors your target whale addresses using a *Dual-Engine* stream (PumpPortal WebSocket + Solana RPC On-Chain Logs).\n\n` +
+                         `• *Gain Factor Math:* When a target wallet buys, Razor compares their spent SOL to their total liquid SOL balance to determine their conviction scale.\n` +
+                         `• *Scale Allocation:* Razor mirrors that exact percentage against your own balance.\n` +
+                         `• *Circuit Breakers:* Max allocation is capped at 10% of portfolio per trade. Min trade size is 0.01 SOL.\n` +
+                         `• *Instant Alerts:* Every buy sends a rich notification to your private alert group.`;
+            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        });
+
+        this.bot.action('help_cat_sniper', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text = `🔫 *5K MILESTONE SNIPER STRATEGY*\n` +
+                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `• *5K Market Cap Gate:* Newly launched meme tokens start around ~$4.5k. Razor only saves tokens that successfully cross *$5,000 USD Market Cap* to avoid zero-volume rugs.\n` +
+                         `• *Milestone Progression:* If a token crosses 10k and 20k MC consecutively, momentum probability spikes. Razor snipes the coin targeting the 50k progression.\n` +
+                         `• *In-Memory Caching:* Token evaluation runs in RAM memory to execute sub-millisecond entry before bonding curve surges.`;
+            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        });
+
+        this.bot.action('help_cat_risk', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text = `🛡️ *RISK MANAGEMENT & ANTI-RUG GUARD*\n` +
+                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `• *Take Profit (2x):* The default rule is to sell 100% position upon achieving a 2x gain.\n` +
+                         `• *Smart Re-entry:* After locking 2x profit, Razor watches for a dip back to the initial entry Market Cap and re-enters with 50% capital.\n` +
+                         `• *Stop Loss (1.2x):* If a position depreciates by 20% (1.2x drop from entry), Razor exits immediately to preserve capital.\n` +
+                         `• *3-Month TTL Auto-Purge:* Dead coins are automatically deleted from MongoDB after 90 days.`;
+            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        });
+
+        this.bot.action('help_cat_wallets', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text = `💼 *WALLET MANAGEMENT COMMANDS*\n` +
+                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `• \`/watch <address>\` — Begin tracking and copy-trading a whale.\n` +
+                         `• \`/remove <address>\` — Stop monitoring and delete from database.\n` +
+                         `• \`/list\` — View all currently active monitored addresses.\n\n` +
+                         `💡 _Tip: You can add or remove wallets on the fly without restarting the bot._`;
+            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        });
+
+        this.bot.action('help_cat_stats', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text = `📊 *PERFORMANCE TERMINAL*\n` +
+                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `• \`/stats\` — Renders real-time PnL metrics and high-resolution chart.\n` +
+                         `• *Timeframes:* Toggle between 24 Hours, 7 Days, and 30 Days.\n` +
+                         `• *Offline Engine:* Charts are generated locally as native high-resolution images in 20ms without relying on external image servers.`;
+            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
         });
     }
 
+    getHelpBackButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 Return to Strategy Guide', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
+        ]);
+    }
+
     async handleStats(ctx, timeframe = '1d') {
-        try {
-            const statsService = require('./stats.service');
-            const stats = await statsService.getStats(timeframe);
-            
-            const caption = `📊 *Razor Bot Performance Analytics*\n` +
-                            `⏱️ *Timeframe:* ${stats.timeframeLabel}\n\n` +
-                            `👁️ *Watched Wallets:* ${stats.totalWatched}\n` +
-                            `🔄 *Total Trades:* ${stats.totalTrades}\n` +
-                            `🟢 *Open Trades:* ${stats.openCount}\n` +
-                            `🔴 *Closed Trades:* ${stats.closedCount}\n` +
-                            `💰 *Estimated PnL:* ${stats.totalPnlSol.toFixed(4)} SOL\n\n` +
-                            `_Generated performance chart below:_`;
-                            
-            const keyboard = this.getStatsButtons(timeframe);
-            const photoInput = stats.chartBuffer ? { source: stats.chartBuffer } : { url: stats.chartUrl };
+        const statsService = require('./stats.service');
+        const stats = await statsService.getStats(timeframe);
+        const solPrice = solanaService.getSolPriceUSD();
+        const pnlUsd = (stats.totalPnlSol * solPrice).toFixed(2);
+        const pnlPrefix = stats.totalPnlSol >= 0 ? '+' : '';
 
-            // If triggered by an inline button on an existing photo message, edit in-place
-            if (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.photo) {
-                try {
-                    await ctx.editMessageMedia(
-                        {
-                            type: 'photo',
-                            media: photoInput,
-                            caption,
-                            parse_mode: 'Markdown'
-                        },
-                        keyboard
-                    );
-                    return;
-                } catch (editErr) {
-                    console.warn("[TELEGRAM] ⚠️ editMessageMedia failed, falling back to new photo:", editErr.message);
-                }
-            }
+        const caption = 
+`⚡ *RAZOR PROTOCOL • PERFORMANCE TERMINAL*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏱️ *Window:* ${stats.timeframeLabel} • Solana Mainnet
 
+📊 *PnL Metrics:*
+• Net PnL: \`${pnlPrefix}${stats.totalPnlSol.toFixed(4)} SOL\` (~$${pnlUsd})
+• Win Rate: \`${stats.winRate}%\` (${stats.closedCount} Settled)
+• Open Positions: \`${stats.openCount} Active\`
+
+🎯 *Network Status:*
+• Monitored Whales: \`${stats.totalWatched} Wallets\`
+• Total Logged Trades: \`${stats.totalTrades}\`
+• SOL Price: \`$${solPrice.toFixed(2)}\`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        const keyboard = this.getStatsButtons(timeframe);
+        const chatId = ctx.chat?.id || ctx.message?.chat?.id || ctx.callbackQuery?.message?.chat?.id;
+
+        if (stats.chartBuffer && chatId) {
             try {
-                await ctx.replyWithPhoto(photoInput, { caption, parse_mode: 'Markdown', ...keyboard });
-            } catch (photoErr) {
-                console.warn("[TELEGRAM] ⚠️ replyWithPhoto failed, falling back to text reply:", photoErr.message);
-                await ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard }).catch(e => {
-                    console.warn("[TELEGRAM] ⚠️ Fallback text reply error:", e.message);
+                // Upload image directly via native Node 26 fetch + FormData (ultra-fast & 100% reliable)
+                const blob = new Blob([stats.chartBuffer], { type: 'image/png' });
+                const form = new FormData();
+                form.append('chat_id', chatId.toString());
+                form.append('photo', blob, 'performance_chart.png');
+                form.append('caption', caption);
+                form.append('parse_mode', 'Markdown');
+                form.append('reply_markup', JSON.stringify(keyboard.reply_markup));
+
+                const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+                    method: 'POST',
+                    body: form
                 });
+                const data = await res.json();
+                if (data.ok) return;
+            } catch (uploadErr) {
+                console.warn("[TELEGRAM] ⚠️ Native photo upload error:", uploadErr.message);
             }
-        } catch (err) {
-            console.error("[TELEGRAM] ❌ Error generating stats:", err.message);
-            ctx.reply("❌ Error retrieving analytics data.").catch(() => {});
         }
+
+        // Clean text fallback
+        ctx.reply(caption, { parse_mode: 'Markdown', ...keyboard }).catch(() => {});
     }
 
     sendHelpMessage(ctx) {
-        const helpText = `
-*Razor Bot Help & Commands* 📖
+        const helpText = 
+`⚡ *RAZOR ARCHITECTURE & CONTROL GUIDE*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Welcome to the Razor autonomous trading engine. Select any module below for in-depth documentation on algorithms and controls:`;
 
-Here is a detailed breakdown of all available commands:
-
-🔸 \`/watch <wallet_address>\`
-Adds a target whale wallet to the active monitor list. When this wallet buys a token on PumpPortal, Razor calculates its **Gain Factor** and mirrors the trade proportionately!
-
-🔸 \`/remove <wallet_address>\`
-Stops monitoring a specific wallet and removes it from the database.
-
-🔸 \`/list\`
-Displays all the wallets you are currently tracking.
-
-🔸 \`/stats\`
-Displays real-time performance analytics (Total Trades, Open/Closed positions, PnL) along with a generated visual performance chart across 1D, 1W, and 1M timeframes.
-
-*Sniper & Anti-Rug Strategy:*
-• **Auto-Watch Threshold:** Only new tokens reaching >$5k Market Cap are added to permanent watchlist.
-• **Milestone Snipe:** Automatically snipes tokens breaking the 10k -> 20k -> 50k progression.
-• **Stop Loss:** Sells instantly if the coin drops 20% (1.2x).
-• **Take Profit:** Automatically sells at 2x to secure your capital.
-        `;
-        ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Help reply error:", e.message));
+        if (ctx.callbackQuery) {
+            ctx.editMessageText(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
+        } else {
+            ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
+        }
     }
 
     async handleListWallets(ctx) {
         const wallets = await WatchedWallet.find({ isActive: true });
         if (wallets.length === 0) {
-            return ctx.reply(`No wallets are currently being watched.`).catch(() => {});
+            return ctx.reply(`👁️ *Monitored Whales:* None active.\n\nTo begin tracking, use: \`/watch <wallet_address>\``, { parse_mode: 'Markdown' }).catch(() => {});
         }
         
-        let response = `👁️ *Watched Wallets:*\n\n`;
+        let response = `👁️ *ACTIVE MONITORED WHALES (${wallets.length})*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         wallets.forEach((w, i) => {
-            response += `${i + 1}. \`${w.walletAddress}\`\n`;
+            const short = `${w.walletAddress.substring(0, 6)}...${w.walletAddress.substring(w.walletAddress.length - 6)}`;
+            response += `${i + 1}. [\`${short}\`](https://solscan.io/account/${w.walletAddress})\n   \`${w.walletAddress}\`\n\n`;
         });
         
-        response += `\nTo remove one, type \`/remove <wallet_address>\``;
+        response += `To remove a wallet: \`/remove <wallet_address>\``;
         ctx.reply(response, { parse_mode: 'Markdown' }).catch(() => {});
     }
 
@@ -276,7 +352,7 @@ Displays real-time performance analytics (Total Trades, Open/Closed positions, P
         if (!this.bot) return;
         const channelId = process.env.TELEGRAM_ALERTS_CHANNEL;
         if (channelId) {
-            console.log(`[TELEGRAM] 📤 Dispatching alert to private channel (${channelId})`);
+            console.log(`[TELEGRAM] 📤 Dispatching alert to channel (${channelId})`);
             this.bot.telegram.sendMessage(channelId, message, { parse_mode: 'Markdown' })
                 .catch(err => console.error("[TELEGRAM] ❌ Alert Error:", err.message));
         }

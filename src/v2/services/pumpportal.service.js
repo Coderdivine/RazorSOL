@@ -1,15 +1,16 @@
 const WebSocket = require('ws');
 const { PUMPPORTAL_API_KEY } = process.env;
 const WatchedWallet = require('../models/WatchedWallet');
-const TokenMetrics = require('../models/TokenMetrics');
 const ActiveTrade = require('../models/ActiveTrade');
 const tradeEngine = require('./trade-engine.service');
+const solanaService = require('./solana.service');
 
 class PumpPortalService {
     constructor() {
         this.ws = null;
         this.reconnectAttempts = 0;
         this.pingInterval = null;
+        this.balanceAlertSent = false;
     }
 
     connect() {
@@ -21,21 +22,25 @@ class PumpPortalService {
             console.log("[PUMPPORTAL] ✅ Successfully connected to WebSocket.");
             this.reconnectAttempts = 0;
             
-            // Subscribe to new tokens
+            // Subscribe to new tokens (Free stream)
             console.log("[PUMPPORTAL] 📡 Subscribing to new token creation stream...");
             this.ws.send(JSON.stringify({ method: "subscribeNewToken" }));
             
-            // Sync watched wallets
+            // Sync watched wallets on PumpPortal
             await this.syncWatchedWallets();
 
             // Sync active trade tokens to watch their MC for TP/SL
             await this.syncActiveTrades();
 
+            // ALSO initialize Dual-Engine On-Chain Solana RPC Monitor for all watched wallets
+            await solanaService.syncAllWatchedWalletsOnRPC((tradeEvent) => {
+                tradeEngine.handleTradeEvent(tradeEvent);
+            });
+
             // Keep connection alive
             this.pingInterval = setInterval(() => {
-                if (this.ws.readyState === WebSocket.OPEN) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     this.ws.ping();
-                    // console.log("[PUMPPORTAL] 💓 Ping sent to keep connection alive."); // Too noisy for console, keeping commented
                 }
             }, 30000);
         });
@@ -101,12 +106,16 @@ class PumpPortalService {
                 keys: [walletAddress]
             }));
         }
+
+        // Also dynamically attach Solana RPC on-chain listener
+        solanaService.watchWalletOnRPC(walletAddress, (tradeEvent) => {
+            tradeEngine.handleTradeEvent(tradeEvent);
+        });
     }
     
     // Add token to stream dynamically
     watchToken(mint) {
          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            console.log(`[PUMPPORTAL] ➕ Dynamically tracking token for TP/SL: ${mint}`);
             this.ws.send(JSON.stringify({
                 method: "subscribeTokenTrade",
                 keys: [mint]
@@ -115,11 +124,25 @@ class PumpPortalService {
     }
 
     async handleMessage(msg) {
+        // Handle PumpPortal API Error Responses
+        if (msg.errors) {
+            console.error(`[PUMPPORTAL] 🚨 API Notice: ${msg.errors}`);
+            if (msg.errors.includes("Minimum balance") && !this.balanceAlertSent) {
+                this.balanceAlertSent = true;
+                const telegramService = require('./telegram.service');
+                telegramService.sendAlert(
+                    `⚠️ *PumpPortal Metered API Notice:*\n\n` +
+                    `PumpPortal requires at least *0.02 SOL* balance in your trading wallet (\`${process.env.WALLET_PUBLIC_KEY}\`) to stream metered account trade events.\n\n` +
+                    `🛡️ *Dual-Engine Fallback Active:* Razor has activated its direct Solana RPC on-chain monitor to watch your target wallets directly on the blockchain without interruption.`
+                );
+            }
+            return;
+        }
+
         if (msg.txType === "create") {
             console.log(`[PUMPPORTAL] 🪙 New token created: ${msg.mint} (Initial MC: ${msg.marketCapSol || 0} SOL)`);
             await tradeEngine.handleNewToken(msg);
         } else if (msg.txType === "buy" || msg.txType === "sell") {
-            // It could be a trade from a watched account, OR a trade on a watched token
             await tradeEngine.handleTradeEvent(msg);
         }
     }

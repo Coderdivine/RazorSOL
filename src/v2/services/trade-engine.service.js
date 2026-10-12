@@ -167,6 +167,16 @@ class TradeEngine {
     }
 
     async executeCopyTrade(tradeEvent, watchedWallet) {
+        if (tradeEvent.signature) {
+            if (!this.processedTradeSigs) this.processedTradeSigs = new Set();
+            if (this.processedTradeSigs.has(tradeEvent.signature)) return;
+            this.processedTradeSigs.add(tradeEvent.signature);
+            if (this.processedTradeSigs.size > 2000) {
+                const first = this.processedTradeSigs.values().next().value;
+                this.processedTradeSigs.delete(first);
+            }
+        }
+
         console.log(`[TRADE-ENGINE] 🧮 Calculating Scale Factor for ${watchedWallet.walletAddress}...`);
         const targetWalletBalance = await solanaService.getSolBalance(watchedWallet.walletAddress);
         const spentSol = tradeEvent.solAmount;
