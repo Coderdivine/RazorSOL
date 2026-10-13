@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: razor-sol-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 2059
+      - key: MONGO_ATLAS_URI
+        sync: false
+      - key: WALLET_PUBLIC_KEY
+        sync: false
+      - key: WALLET_PRIVATE_KEY
+        sync: false
+      - key: PUMPPORTAL_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALERTS_CHANNEL
+        sync: false
+      - key: SOLANA_RPC_URL
+        value: https://api.mainnet-beta.solana.com/
