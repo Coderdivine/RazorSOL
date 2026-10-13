@@ -1,9 +1,23 @@
 const { Telegraf, Markup } = require('telegraf');
+const { PublicKey } = require('@solana/web3.js');
 const WatchedWallet = require('../models/WatchedWallet');
 const ActiveTrade = require('../models/ActiveTrade');
 const TokenMetrics = require('../models/TokenMetrics');
 const solanaService = require('./solana.service');
 const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY, TELEGRAM_ALERTS_CHANNEL } = process.env;
+
+function isValidSolanaAddress(addr) {
+    if (!addr || typeof addr !== 'string') return false;
+    const trimmed = addr.trim();
+    if (trimmed.length < 32 || trimmed.length > 44) return false;
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) return false;
+    try {
+        const pk = new PublicKey(trimmed);
+        return PublicKey.isOnCurve(pk.toBuffer());
+    } catch {
+        return false;
+    }
+}
 
 class TelegramService {
     constructor() {
@@ -20,23 +34,28 @@ class TelegramService {
         this.bot = new Telegraf(TELEGRAM_BOT_TOKEN);
         console.log("[TELEGRAM] 🤖 Telegram Bot Controller initialized.");
 
-        // Centralized error handler to prevent transient network errors (ECONNRESET, ETIMEDOUT) from crashing the server
+        // Centralized error handler to prevent transient network errors from crashing the process
         this.bot.catch((err, ctx) => {
             console.warn(`[TELEGRAM] ⚠️ Handled Telegraf network/API error for ${ctx?.updateType || 'operation'}:`, err.message);
         });
 
         this.registerCommands();
+        this.registerHears();
+        this.registerInlineQuery();
         this.registerActions();
+        this.registerTextHandler();
 
         // Register Telegram Command Auto-Suggestions across all scopes (shown as user types '/')
         try {
             const commands = [
-                { command: 'profile', description: '🤖 View Bot Profile, Strategy & Live Status' },
-                { command: 'address', description: '💳 View Bot Trading Wallet Address & Balance' },
+                { command: 'start', description: '⚡ Open Main Trading Terminal & Controls' },
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
-                { command: 'list', description: '👁️ View Active Monitored Whale Wallets' },
+                { command: 'profile', description: '🤖 Bot Profile, Strategy & Live Status' },
+                { command: 'address', description: '💳 Bot Trading Wallet Address & Balance' },
+                { command: 'wallet', description: '💳 View Bot Trading Wallet (Alias)' },
+                { command: 'list', description: '👁️ Active Monitored Whale Wallets' },
                 { command: 'watch', description: '🎯 Mirror a Whale: /watch <address>' },
-                { command: 'remove', description: '🗑️ Stop Monitoring: /remove <address>' },
+                { command: 'remove', description: '🗑️ Untrack a Whale: /remove <address>' },
                 { command: 'help', description: '📖 Interactive Strategy & Control Guide' }
             ];
 
@@ -48,7 +67,7 @@ class TelegramService {
         } catch (e) {
             console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
         }
-        
+
         // Launch the bot gracefully
         this.bot.launch().catch(err => {
             console.error("[TELEGRAM] ❌ Failed to launch bot:", err.message);
@@ -57,6 +76,14 @@ class TelegramService {
         // Enable graceful stop
         process.once('SIGINT', () => this.bot && this.bot.stop('SIGINT'));
         process.once('SIGTERM', () => this.bot && this.bot.stop('SIGTERM'));
+    }
+
+    getPersistentKeyboard() {
+        return Markup.keyboard([
+            ['📊 /stats', '🤖 /profile'],
+            ['💳 /address', '📜 /list'],
+            ['🎯 /watch', '📖 /help']
+        ]).resize().persistent().placeholder('💡 Type / or tap a command below...');
     }
 
     getMenuButtons() {
@@ -93,17 +120,28 @@ class TelegramService {
         ]);
     }
 
+    getHelpBackButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 Return to Strategy Guide', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
+        ]);
+    }
+
     registerCommands() {
         // Start Command
-        this.bot.start((ctx) => {
+        this.bot.start(async (ctx) => {
             console.log(`[TELEGRAM] 📥 Received /start command from user: ${ctx.chat.id}`);
             const msg = `⚡ *RAZOR SOLANA TRADING TERMINAL*\n` +
                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
                         `Institutional-grade copy-trading, 5K milestone sniping, and autonomous bonding curve execution.\n\n` +
                         `• *Engine Status:* 🟢 Active 24/7\n` +
                         `• *Trading Wallet:* \`${WALLET_PUBLIC_KEY}\`\n\n` +
-                        `Select an option below or type \`/\` to see available commands:`;
-            ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Start reply error:", e.message));
+                        `💡 *Quick Suggestion Bar:* Commands are now available in your keyboard below and auto-suggest as you type \`/\`.`;
+            
+            // Attach persistent reply keyboard so placeholder and instant buttons are pinned
+            await ctx.reply(msg, { parse_mode: 'Markdown', ...this.getPersistentKeyboard() }).catch(e => console.warn("[TELEGRAM] Start reply error:", e.message));
+            
+            // Send inline action dashboard
+            await ctx.reply(`Select an operation to execute:`, this.getMenuButtons()).catch(() => {});
         });
 
         // Address Command (with /wallet alias)
@@ -139,35 +177,26 @@ class TelegramService {
         this.bot.command('watch', async (ctx) => {
             console.log(`[TELEGRAM] 📥 Received /watch command from user: ${ctx.chat.id}`);
             const text = ctx.message.text;
-            const parts = text.split(' ');
+            const parts = text.split(' ').filter(p => p.trim().length > 0);
             
-            if(parts.length < 2) {
-                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/watch <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
+            if (parts.length < 2) {
+                return ctx.reply(
+                    `🎯 *HOW TO WATCH A WHALE WALLET*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `Track any whale wallet to mirror their trades in real-time.\n\n` +
+                    `*Usage:*\n\`/watch <wallet_address>\`\n\n` +
+                    `*Example:*\n\`/watch AH39BneW9UeWxQysUcwogQrYFdPvJuRVZ5w4ccq9SKfL\`\n\n` +
+                    `💡 *Pro-Tip:* You can also simply *paste* any Solana wallet address directly into this chat!`,
+                    { parse_mode: 'Markdown' }
+                ).catch(() => {});
             }
             
             const wallet = parts[1].trim();
-
-            try {
-                const existing = await WatchedWallet.findOne({ walletAddress: wallet });
-                if (existing) {
-                    return ctx.reply(`⚠️ Wallet \`${wallet}\` is already in your active watch list.`, { parse_mode: 'Markdown' }).catch(() => {});
-                }
-
-                await WatchedWallet.create({
-                    walletAddress: wallet,
-                    addedBy: ctx.chat.id.toString()
-                });
-
-                // Dynamically subscribe on both PumpPortal and Solana RPC
-                const wsService = require('./pumpportal.service');
-                wsService.watchWallet(wallet);
-
-                console.log(`[TELEGRAM] ✅ Successfully added wallet to watch list: ${wallet}`);
-                ctx.reply(`🎯 *Target Wallet Added to Dual-Engine Monitor:*\n\`${wallet}\`\n\n_Razor will mirror buys proportionally in real-time._`, { parse_mode: 'Markdown' }).catch(() => {});
-            } catch (err) {
-                console.error(`[TELEGRAM] ❌ Error adding wallet:`, err.message);
-                ctx.reply(`❌ Error adding wallet: ${err.message}`).catch(() => {});
+            if (!isValidSolanaAddress(wallet)) {
+                return ctx.reply(`❌ *Invalid Solana Address:*\n\`${wallet}\`\nPlease provide a valid 32-44 character base58 public key.`, { parse_mode: 'Markdown' }).catch(() => {});
             }
+
+            await this.addWalletToWatch(ctx, wallet);
         });
 
         // List Command
@@ -180,22 +209,238 @@ class TelegramService {
         this.bot.command('remove', async (ctx) => {
             console.log(`[TELEGRAM] 📥 Received /remove command from user: ${ctx.chat.id}`);
             const text = ctx.message.text;
-            const parts = text.split(' ');
+            const parts = text.split(' ').filter(p => p.trim().length > 0);
             
-            if(parts.length < 2) {
-                return ctx.reply('❌ Please provide a wallet address.\n*Usage:* `/remove <wallet_address>`', { parse_mode: 'Markdown' }).catch(() => {});
+            if (parts.length < 2) {
+                return this.handleListWallets(ctx);
             }
             
             const wallet = parts[1].trim();
-            const result = await WatchedWallet.deleteOne({ walletAddress: wallet });
+            await this.removeWalletFromWatch(ctx, wallet);
+        });
+    }
+
+    registerHears() {
+        // Handle persistent reply keyboard taps and natural language typed commands
+        this.bot.hears([/^\s*📊\s*(\/)?stats/i, /^\s*stats\b/i, /^\s*pnl\b/i, /^\s*chart\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: stats from user: ${ctx.chat.id}`);
+            await this.handleStats(ctx, '1d');
+        });
+
+        this.bot.hears([/^\s*🤖\s*(\/)?profile/i, /^\s*profile(s)?\b/i, /^\s*status\b/i, /^\s*config\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: profile from user: ${ctx.chat.id}`);
+            await this.handleBotProfile(ctx);
+        });
+
+        this.bot.hears([/^\s*💳\s*(\/)?address/i, /^\s*address\b/i, /^\s*wallet\b/i, /^\s*balance\b/i, /^\s*sol\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: address from user: ${ctx.chat.id}`);
+            await this.handleBotAddress(ctx);
+        });
+
+        this.bot.hears([/^\s*📜\s*(\/)?list/i, /^\s*list\b/i, /^\s*wallets\b/i, /^\s*tracked\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: list from user: ${ctx.chat.id}`);
+            await this.handleListWallets(ctx);
+        });
+
+        this.bot.hears([/^\s*📖\s*(\/)?help/i, /^\s*help\b/i, /^\s*guide\b/i, /^\s*strategy\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: help from user: ${ctx.chat.id}`);
+            this.sendHelpMessage(ctx);
+        });
+
+        this.bot.hears([/^\s*🎯\s*(\/)?watch/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: watch guide from user: ${ctx.chat.id}`);
+            const text = 
+`🎯 *COPY-TRADE WHALE WALLET*
+━━━━━━━━━━━━━━━━━━━━━━
+To track a whale and mirror trades proportionally, send:
+\`/watch <wallet_address>\`
+
+*Example:*
+\`/watch AH39BneW9UeWxQysUcwogQrYFdPvJuRVZ5w4ccq9SKfL\`
+
+💡 *Pro-Tip:* You can also simply *paste* any Solana wallet address directly into this chat! Razor will detect it automatically.`;
+            ctx.reply(text, { parse_mode: 'Markdown' }).catch(() => {});
+        });
+    }
+
+    registerInlineQuery() {
+        // Enables interactive command suggestions right above typing bar when user types @RazorSOLbot
+        this.bot.on('inline_query', async (ctx) => {
+            const query = (ctx.inlineQuery?.query || '').trim().toLowerCase();
+            const results = [
+                {
+                    type: 'article',
+                    id: 'cmd_stats',
+                    title: '📊 /stats — Performance Terminal',
+                    description: 'View real-time PnL, win rate, and chart',
+                    input_message_content: { message_text: '/stats' }
+                },
+                {
+                    type: 'article',
+                    id: 'cmd_profile',
+                    title: '🤖 /profile — Bot Profile & Status',
+                    description: 'View risk caps, sniper parameters, and engine uptime',
+                    input_message_content: { message_text: '/profile' }
+                },
+                {
+                    type: 'article',
+                    id: 'cmd_address',
+                    title: '💳 /address — Bot Trading Wallet',
+                    description: 'View trading wallet address and live SOL balance',
+                    input_message_content: { message_text: '/address' }
+                },
+                {
+                    type: 'article',
+                    id: 'cmd_list',
+                    title: '📜 /list — Monitored Wallets',
+                    description: 'View all active whale wallets currently tracked',
+                    input_message_content: { message_text: '/list' }
+                },
+                {
+                    type: 'article',
+                    id: 'cmd_help',
+                    title: '📖 /help — Strategy & Architecture Guide',
+                    description: 'Interactive breakdown of 5K gate, milestone sniping, and risk rules',
+                    input_message_content: { message_text: '/help' }
+                }
+            ];
+
+            const filtered = query
+                ? results.filter(r => r.title.toLowerCase().includes(query) || r.description.toLowerCase().includes(query) || r.id.toLowerCase().includes(query))
+                : results;
+
+            await ctx.answerInlineQuery(filtered, { cache_time: 10 }).catch(() => {});
+        });
+    }
+
+    registerTextHandler() {
+        // Fallback text router: detects pasted Solana addresses or gives smart suggestions for unknown input
+        this.bot.on('text', async (ctx) => {
+            const text = ctx.message.text.trim();
+
+            // Check if user pasted a Solana address directly
+            if (isValidSolanaAddress(text)) {
+                return this.handleDetectedWallet(ctx, text);
+            }
+
+            // If user typed an unrecognized message, suggest commands with 1-tap buttons
+            const suggestMsg =
+`💡 *Razor Command Assistant*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+I didn't recognize that command. Here are quick shortcuts you can use:
+
+• \`/stats\` — 📊 View live PnL, win rate & chart
+• \`/profile\` — 🤖 View bot strategy & live status
+• \`/address\` — 💳 View bot trading wallet & balance
+• \`/list\` — 📜 View active monitored whale wallets
+• \`/watch <address>\` — 🎯 Mirror a whale wallet
+• \`/remove <address>\` — 🗑️ Untrack a whale wallet
+• \`/help\` — 📖 Strategy documentation & controls
+
+_Tap any button below or use the pinned menu at the bottom:_`;
+
+            await ctx.reply(suggestMsg, {
+                parse_mode: 'Markdown',
+                reply_markup: Markup.inlineKeyboard([
+                    [Markup.button.callback('📊 /stats', 'action_stats'), Markup.button.callback('🤖 /profile', 'action_profile')],
+                    [Markup.button.callback('💳 /address', 'action_address'), Markup.button.callback('📜 /list', 'action_list')],
+                    [Markup.button.callback('📖 /help', 'action_help')]
+                ]).reply_markup
+            }).catch(() => {});
+        });
+    }
+
+    async handleDetectedWallet(ctx, wallet) {
+        if (WALLET_PUBLIC_KEY && wallet.toLowerCase() === WALLET_PUBLIC_KEY.toLowerCase()) {
+            return ctx.reply(
+                `💡 That is *Razor's own trading wallet*!\n\nTo view its balance and explorer details, run \`/address\`.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+
+        const existing = await WatchedWallet.findOne({ walletAddress: wallet });
+        if (existing) {
+            return ctx.reply(
+                `👁️ *Monitored Whale Address Detected*\n\`${wallet}\`\n\nThis whale is already in your active monitor list.`,
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: Markup.inlineKeyboard([
+                        [Markup.button.callback('🗑️ Untrack Wallet', `unwatch:${wallet}`)],
+                        [Markup.button.url('🔎 View on Solscan', `https://solscan.io/account/${wallet}`)]
+                    ]).reply_markup
+                }
+            );
+        }
+
+        return ctx.reply(
+            `🎯 *Solana Wallet Address Detected:*\n\`${wallet}\`\n\nWould you like Razor to monitor and mirror this whale's trades?`,
+            {
+                parse_mode: 'Markdown',
+                reply_markup: Markup.inlineKeyboard([
+                    [Markup.button.callback('➕ Start Copy-Trading', `watch:${wallet}`)],
+                    [Markup.button.url('🔎 View on Solscan', `https://solscan.io/account/${wallet}`)]
+                ]).reply_markup
+            }
+        );
+    }
+
+    async addWalletToWatch(ctx, wallet) {
+        try {
+            const existing = await WatchedWallet.findOne({ walletAddress: wallet });
+            if (existing) {
+                return ctx.reply(`⚠️ Wallet \`${wallet}\` is already in your active watch list.`, { parse_mode: 'Markdown' }).catch(() => {});
+            }
+
+            await WatchedWallet.create({
+                walletAddress: wallet,
+                addedBy: ctx.chat?.id?.toString() || 'unknown'
+            });
+
+            // Dynamically subscribe on both PumpPortal and Solana RPC
+            const wsService = require('./pumpportal.service');
+            wsService.watchWallet(wallet);
+
+            console.log(`[TELEGRAM] ✅ Successfully added wallet to watch list: ${wallet}`);
+            const msg = `🎯 *Target Whale Added to Dual-Engine Monitor:*\n\`${wallet}\`\n\n_Razor will mirror buys proportionally in real-time._`;
             
+            const buttons = Markup.inlineKeyboard([
+                [Markup.button.callback('📜 View Monitored Wallets', 'action_list'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
+                [Markup.button.url('🔎 View on Solscan', `https://solscan.io/account/${wallet}`)]
+            ]);
+
+            if (ctx.callbackQuery) {
+                await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...buttons }).catch(() => {
+                    ctx.reply(msg, { parse_mode: 'Markdown', ...buttons }).catch(() => {});
+                });
+            } else {
+                ctx.reply(msg, { parse_mode: 'Markdown', ...buttons }).catch(() => {});
+            }
+        } catch (err) {
+            console.error(`[TELEGRAM] ❌ Error adding wallet:`, err.message);
+            ctx.reply(`❌ Error adding wallet: ${err.message}`).catch(() => {});
+        }
+    }
+
+    async removeWalletFromWatch(ctx, wallet) {
+        try {
+            const result = await WatchedWallet.deleteOne({ walletAddress: wallet });
             if (result.deletedCount > 0) {
                 console.log(`[TELEGRAM] 🗑️ Removed wallet from watch list: ${wallet}`);
-                ctx.reply(`🗑️ Untracked wallet:\n\`${wallet}\``, { parse_mode: 'Markdown' }).catch(() => {});
+                const msg = `🗑️ *Untracked Wallet:*\n\`${wallet}\`\n\n_Removed from real-time monitoring and copy-trading._`;
+                if (ctx.callbackQuery) {
+                    await ctx.editMessageText(msg, { parse_mode: 'Markdown' }).catch(() => {
+                        ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => {});
+                    });
+                } else {
+                    ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => {});
+                }
             } else {
                 ctx.reply(`⚠️ Wallet not found in active watch list.`).catch(() => {});
             }
-        });
+        } catch (err) {
+            console.error(`[TELEGRAM] ❌ Error removing wallet:`, err.message);
+            ctx.reply(`❌ Error removing wallet: ${err.message}`).catch(() => {});
+        }
     }
 
     registerActions() {
@@ -237,6 +482,19 @@ class TelegramService {
         this.bot.action('action_stats_1m', async (ctx) => {
             await ctx.answerCbQuery('Loading 30D Window...').catch(() => {});
             this.handleStats(ctx, '1m');
+        });
+
+        // Dynamic One-Tap Watch & Unwatch callback actions
+        this.bot.action(/^watch:(.+)$/, async (ctx) => {
+            const wallet = ctx.match[1];
+            await ctx.answerCbQuery('Adding to monitor...').catch(() => {});
+            await this.addWalletToWatch(ctx, wallet);
+        });
+
+        this.bot.action(/^unwatch:(.+)$/, async (ctx) => {
+            const wallet = ctx.match[1];
+            await ctx.answerCbQuery('Removing from monitor...').catch(() => {});
+            await this.removeWalletFromWatch(ctx, wallet);
         });
 
         // Help Categories
@@ -295,12 +553,6 @@ class TelegramService {
                          `• *Offline Engine:* Charts are generated locally as native high-resolution images in 20ms without relying on external image servers.`;
             ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
         });
-    }
-
-    getHelpBackButtons() {
-        return Markup.inlineKeyboard([
-            [Markup.button.callback('🔙 Return to Strategy Guide', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
-        ]);
     }
 
     async handleBotAddress(ctx) {
@@ -448,7 +700,7 @@ _Send SOL to the address above to fund autonomous copy-trading and milestone sni
 
         if (stats.chartBuffer && chatId) {
             try {
-                // Upload image directly via native Node 26 fetch + FormData (ultra-fast & 100% reliable)
+                // Upload image directly via native Node fetch + FormData (ultra-fast & 100% reliable)
                 const blob = new Blob([stats.chartBuffer], { type: 'image/png' });
                 const form = new FormData();
                 form.append('chat_id', chatId.toString());
@@ -490,7 +742,10 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
     async handleListWallets(ctx) {
         const wallets = await WatchedWallet.find({ isActive: true });
         if (wallets.length === 0) {
-            return ctx.reply(`👁️ *Monitored Whales:* None active.\n\nTo begin tracking, use: \`/watch <wallet_address>\``, { parse_mode: 'Markdown' }).catch(() => {});
+            return ctx.reply(
+                `👁️ *Monitored Whales:* None active.\n\nTo begin tracking, use: \`/watch <wallet_address>\` or paste an address below.`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
         }
         
         let response = `👁️ *ACTIVE MONITORED WHALES (${wallets.length})*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
@@ -499,8 +754,27 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
             response += `${i + 1}. [\`${short}\`](https://solscan.io/account/${w.walletAddress})\n   \`${w.walletAddress}\`\n\n`;
         });
         
-        response += `To remove a wallet: \`/remove <wallet_address>\``;
-        ctx.reply(response, { parse_mode: 'Markdown' }).catch(() => {});
+        response += `_Tap a button below to remove, or use \`/remove <address>\`_`;
+
+        // Generate quick action buttons for monitored wallets
+        const inlineRows = wallets.map(w => {
+            const short = `${w.walletAddress.substring(0, 4)}...${w.walletAddress.substring(w.walletAddress.length - 4)}`;
+            return [
+                Markup.button.callback(`🗑️ Untrack ${short}`, `unwatch:${w.walletAddress}`),
+                Markup.button.url(`🔎 Solscan`, `https://solscan.io/account/${w.walletAddress}`)
+            ];
+        });
+
+        inlineRows.push([
+            Markup.button.callback('📊 Performance Terminal', 'action_stats'),
+            Markup.button.callback('🤖 Bot Profile', 'action_profile')
+        ]);
+
+        ctx.reply(response, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+            reply_markup: Markup.inlineKeyboard(inlineRows).reply_markup
+        }).catch(() => {});
     }
 
     sendAlert(message) {
