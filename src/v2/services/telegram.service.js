@@ -1,11 +1,14 @@
 const { Telegraf, Markup } = require('telegraf');
 const WatchedWallet = require('../models/WatchedWallet');
+const ActiveTrade = require('../models/ActiveTrade');
+const TokenMetrics = require('../models/TokenMetrics');
 const solanaService = require('./solana.service');
-const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY } = process.env;
+const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY, TELEGRAM_ALERTS_CHANNEL } = process.env;
 
 class TelegramService {
     constructor() {
         this.bot = null;
+        this.startedAt = new Date();
     }
 
     async init() {
@@ -28,6 +31,8 @@ class TelegramService {
         // Register Telegram Command Auto-Suggestions across all scopes (shown as user types '/')
         try {
             const commands = [
+                { command: 'profile', description: '🤖 View Bot Profile, Strategy & Live Status' },
+                { command: 'address', description: '💳 View Bot Trading Wallet Address & Balance' },
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
                 { command: 'list', description: '👁️ View Active Monitored Whale Wallets' },
                 { command: 'watch', description: '🎯 Mirror a Whale: /watch <address>' },
@@ -56,6 +61,7 @@ class TelegramService {
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
+            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
             [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
             [Markup.button.callback('📖 Strategy & Architecture Guide', 'action_help')]
         ]);
@@ -73,13 +79,14 @@ class TelegramService {
             ],
             [
                 Markup.button.callback('🔄 Refresh Data', `action_stats_${currentTimeframe}`),
-                Markup.button.callback('📖 Help Guide', 'action_help')
+                Markup.button.callback('🤖 Bot Profile', 'action_profile')
             ]
         ]);
     }
 
     getHelpCategoryButtons() {
         return Markup.inlineKeyboard([
+            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
             [Markup.button.callback('🎯 Copy Trading Engine', 'help_cat_copy'), Markup.button.callback('🔫 5K Milestone Sniper', 'help_cat_sniper')],
             [Markup.button.callback('🛡️ Risk & Anti-Rug Guard', 'help_cat_risk'), Markup.button.callback('💼 Wallet Management', 'help_cat_wallets')],
             [Markup.button.callback('📊 Analytics Terminal', 'help_cat_stats'), Markup.button.callback('⚡ Main Dashboard', 'action_stats')]
@@ -97,6 +104,18 @@ class TelegramService {
                         `• *Trading Wallet:* \`${WALLET_PUBLIC_KEY}\`\n\n` +
                         `Select an option below or type \`/\` to see available commands:`;
             ctx.reply(msg, { parse_mode: 'Markdown', ...this.getMenuButtons() }).catch(e => console.warn("[TELEGRAM] Start reply error:", e.message));
+        });
+
+        // Address Command (with /wallet alias)
+        this.bot.command(['address', 'wallet'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /address command from user: ${ctx.chat.id}`);
+            await this.handleBotAddress(ctx);
+        });
+
+        // Profile Command (with /profiles alias)
+        this.bot.command(['profile', 'profiles'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /profile command from user: ${ctx.chat.id}`);
+            await this.handleBotProfile(ctx);
         });
 
         // Help Command
@@ -180,6 +199,16 @@ class TelegramService {
     }
 
     registerActions() {
+        this.bot.action('action_address', async (ctx) => {
+            await ctx.answerCbQuery('Fetching wallet details...').catch(() => {});
+            await this.handleBotAddress(ctx);
+        });
+
+        this.bot.action('action_profile', async (ctx) => {
+            await ctx.answerCbQuery('Loading bot profile...').catch(() => {});
+            await this.handleBotProfile(ctx);
+        });
+
         this.bot.action('action_list', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
             await this.handleListWallets(ctx);
@@ -248,6 +277,8 @@ class TelegramService {
             await ctx.answerCbQuery().catch(() => {});
             const text = `💼 *WALLET MANAGEMENT COMMANDS*\n` +
                          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                         `• \`/address\` — View bot trading wallet address & live SOL balance.\n` +
+                         `• \`/profile\` — View bot trading profile, strategy parameters & status.\n` +
                          `• \`/watch <address>\` — Begin tracking and copy-trading a whale.\n` +
                          `• \`/remove <address>\` — Stop monitoring and delete from database.\n` +
                          `• \`/list\` — View all currently active monitored addresses.\n\n` +
@@ -270,6 +301,123 @@ class TelegramService {
         return Markup.inlineKeyboard([
             [Markup.button.callback('🔙 Return to Strategy Guide', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
         ]);
+    }
+
+    async handleBotAddress(ctx) {
+        try {
+            const walletAddress = WALLET_PUBLIC_KEY || 'Not Configured';
+            const solBalance = WALLET_PUBLIC_KEY ? await solanaService.getSolBalance(WALLET_PUBLIC_KEY) : 0;
+            const solPrice = solanaService.getSolPriceUSD();
+            const usdBalance = (solBalance * solPrice).toFixed(2);
+            const streamStatus = solBalance >= 0.02
+                ? '🟢 Metered Stream Active (≥ 0.02 SOL)'
+                : '🟡 On-Chain RPC Mode (Fund ≥ 0.02 SOL for PumpPortal WSS)';
+
+            const text =
+`💳 *RAZOR BOT TRADING WALLET*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏷️ *Public Key (Tap to Copy):*
+\`${walletAddress}\`
+
+💰 *Live Balance:*
+• *SOL:* \`${solBalance.toFixed(4)} SOL\` (~$${usdBalance} USD)
+• *SOL Price:* \`$${solPrice.toFixed(2)}\`
+• *Stream Tier:* ${streamStatus}
+
+🔗 *Explorer:* [View on Solscan](https://solscan.io/account/${walletAddress})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_Send SOL to the address above to fund autonomous copy-trading and milestone snipes._`;
+
+            const buttons = Markup.inlineKeyboard([
+                [Markup.button.callback('🔄 Refresh Balance', 'action_address'), Markup.button.callback('🤖 Bot Profile', 'action_profile')],
+                [Markup.button.url('🔎 Open on Solscan', `https://solscan.io/account/${walletAddress}`)]
+            ]);
+
+            if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(async () => {
+                    await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+                });
+            } else {
+                await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+            }
+        } catch (err) {
+            console.error("[TELEGRAM] ❌ Error in handleBotAddress:", err.message);
+            ctx.reply("❌ Error fetching bot wallet address.").catch(() => {});
+        }
+    }
+
+    async handleBotProfile(ctx) {
+        try {
+            const walletAddress = WALLET_PUBLIC_KEY || 'Not Configured';
+            const shortWallet = walletAddress.length > 10
+                ? `${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 6)}`
+                : walletAddress;
+
+            const [solBalance, watchedCount, trackedTokensCount, openTradesCount, closedTradesCount] = await Promise.all([
+                WALLET_PUBLIC_KEY ? solanaService.getSolBalance(WALLET_PUBLIC_KEY) : 0,
+                WatchedWallet.countDocuments({ isActive: true }).catch(() => 0),
+                TokenMetrics.countDocuments({}).catch(() => 0),
+                ActiveTrade.countDocuments({ status: { $in: ['OPEN', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).catch(() => 0),
+                ActiveTrade.countDocuments({ status: 'CLOSED' }).catch(() => 0)
+            ]);
+
+            const solPrice = solanaService.getSolPriceUSD();
+            const usdBalance = (solBalance * solPrice).toFixed(2);
+
+            const uptimeMs = Date.now() - this.startedAt.getTime();
+            const hours = Math.floor(uptimeMs / (1000 * 60 * 60));
+            const mins = Math.floor((uptimeMs % (1000 * 60 * 60)) / (1000 * 60));
+            const uptimeStr = `${hours}h ${mins}m`;
+
+            const text =
+`🤖 *RAZOR BOT PROFILE & CONFIGURATION*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *System Identity:*
+• *Bot Name:* RazorSOL Autonomous Engine
+• *Status:* 🟢 Online 24/7 (Uptime: \`${uptimeStr}\`)
+• *Data Feeds:* Dual-Engine (PumpPortal WSS + Solana RPC)
+• *Alert Channel:* \`${TELEGRAM_ALERTS_CHANNEL || 'Not Set'}\`
+
+💳 *Trading Vault:*
+• *Address:* [\`${shortWallet}\`](https://solscan.io/account/${walletAddress})
+• *Full Key:* \`${walletAddress}\`
+• *Liquid Balance:* \`${solBalance.toFixed(4)} SOL\` (~$${usdBalance})
+
+🎯 *Copy-Trading Profile:*
+• *Sizing Model:* Proportional Whale Gain Factor
+• *Max Risk Cap:* \`10%\` of Portfolio per Trade
+• *Min Order Size:* \`0.01 SOL\` (Fallback: \`5%\`)
+• *Slippage / Priority:* \`15%\` Slippage • Local Signing
+
+🔫 *Sniper & Risk Profile:*
+• *Watchlist Gate:* \`> $5,000 USD\` Market Cap
+• *Snipe Progression:* \`$10k ➔ $20k ➔ $50k\` MC
+• *Take Profit (TP):* \`2.0x (+100%)\` + \`50%\` Dip Re-entry
+• *Stop Loss (SL):* \`1.2x (-16.7%)\` Hard Protection
+• *DB Auto-Cleanup:* \`90 Days\` (3-Month TTL)
+
+📊 *Live State Summary:*
+• *Monitored Whales:* \`${watchedCount}\`
+• *5K+ Watchlist Coins:* \`${trackedTokensCount}\`
+• *Active Positions:* \`${openTradesCount}\` | *Settled:* \`${closedTradesCount}\`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+            const buttons = Markup.inlineKeyboard([
+                [Markup.button.callback('💳 Bot Address', 'action_address'), Markup.button.callback('📊 Performance Chart', 'action_stats')],
+                [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('🔄 Refresh Profile', 'action_profile')]
+            ]);
+
+            if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(async () => {
+                    await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+                });
+            } else {
+                await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+            }
+        } catch (err) {
+            console.error("[TELEGRAM] ❌ Error in handleBotProfile:", err.message);
+            ctx.reply("❌ Error loading bot profile.").catch(() => {});
+        }
     }
 
     async handleStats(ctx, timeframe = '1d') {
@@ -330,8 +478,10 @@ class TelegramService {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Welcome to the Razor autonomous trading engine. Select any module below for in-depth documentation on algorithms and controls:`;
 
-        if (ctx.callbackQuery) {
-            ctx.editMessageText(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
+        if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+            ctx.editMessageText(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {
+                ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
+            });
         } else {
             ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
         }
