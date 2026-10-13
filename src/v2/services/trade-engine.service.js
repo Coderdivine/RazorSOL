@@ -67,7 +67,12 @@ class TradeEngine {
             isSavedToDB: false
         });
 
-        // Instruct WebSocket to watch this token so we get MC updates to see if it reaches 7k
+        // If the token already launched at >= $5,000 MC, evaluate & save immediately
+        if (mcUSD >= 5000) {
+            await this.updateTokenMilestones(mint, initialMC);
+        }
+
+        // Instruct WebSocket to watch this token so we get MC updates
         const wsService = require('./pumpportal.service');
         wsService.watchToken(mint);
     }
@@ -84,11 +89,16 @@ class TradeEngine {
         }
         
         // 2. Evaluate if it's a watched wallet trade (Copy Trade)
-        if(msg.txType === 'buy' && trader) {
+        if(trader) {
             const watched = await WatchedWallet.findOne({ walletAddress: trader, isActive: true });
             if(watched) {
-                console.log(`[TRADE-ENGINE] 🎯 Watched wallet ${trader} bought ${mint}`);
-                await this.executeCopyTrade(msg, watched);
+                if (msg.txType === 'buy') {
+                    console.log(`[TRADE-ENGINE] 🎯 Watched wallet ${trader} bought ${mint}`);
+                    await this.executeCopyTrade(msg, watched);
+                } else if (msg.txType === 'sell') {
+                    console.log(`[TRADE-ENGINE] 📉 Watched wallet ${trader} sold ${mint} (+${(solAmount || 0).toFixed(4)} SOL)`);
+                    await this.reportWhaleSell(msg, watched);
+                }
             }
         }
         
@@ -96,6 +106,51 @@ class TradeEngine {
         if(mint && mc) {
             await this.evaluateActiveTrades(mint, mc);
         }
+    }
+
+    async fetchTokenMetadataFallback(mint) {
+        try {
+            const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 3500 });
+            const pair = res.data?.pairs?.[0];
+            if (pair && pair.baseToken) {
+                return {
+                    name: pair.baseToken.name || 'Unknown',
+                    symbol: pair.baseToken.symbol || 'UNK',
+                    marketCapUSD: pair.marketCap || pair.fdv || 0
+                };
+            }
+        } catch (e) {
+            // Ignore DexScreener fallback timeout
+        }
+        return null;
+    }
+
+    async reportWhaleSell(tradeEvent, watchedWallet) {
+        if (tradeEvent.signature) {
+            if (!this.processedTradeSigs) this.processedTradeSigs = new Set();
+            if (this.processedTradeSigs.has(tradeEvent.signature)) return;
+            this.processedTradeSigs.add(tradeEvent.signature);
+        }
+
+        let tokenData = this.tokenCache.get(tradeEvent.mint) || await TokenMetrics.findOne({ mint: tradeEvent.mint });
+        let mcUSD = tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0;
+
+        if (!tokenData || !mcUSD) {
+            const dexData = await this.fetchTokenMetadataFallback(tradeEvent.mint);
+            if (dexData) {
+                if (!tokenData) tokenData = { name: dexData.name, symbol: dexData.symbol };
+                if (!mcUSD && dexData.marketCapUSD) mcUSD = dexData.marketCapUSD;
+            }
+        }
+
+        const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+        const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Live on DEX';
+        const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
+        const receivedSol = tradeEvent.solAmount || 0;
+
+        const telegramService = require('./telegram.service');
+        const alertMsg = `📉 *Whale Sell Detected!* 📉\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Received:* ${receivedSol.toFixed(4)} SOL\n📈 *Current MC:* ${mcTracker}\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        telegramService.sendAlert(alertMsg);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -115,7 +170,7 @@ class TradeEngine {
 
         // 🚨 NEW LOGIC: Only save new tokens to permanent DB if they hit $5,000 MC 🚨
         if(currentMC_USD >= 5000 && !token.isSavedToDB) {
-            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $5k MC! Saving to permanent DB watchlist.`);
+            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $5k MC ($${currentMC_USD.toFixed(2)})! Saving to permanent DB watchlist.`);
             token.isSavedToDB = true;
             updated = true;
             try {
@@ -178,7 +233,7 @@ class TradeEngine {
         }
 
         console.log(`[TRADE-ENGINE] 🧮 Calculating Scale Factor for ${watchedWallet.walletAddress}...`);
-        const targetWalletBalance = await solanaService.getSolBalance(watchedWallet.walletAddress);
+        const targetWalletBalance = tradeEvent.traderBalanceSol || await solanaService.getSolBalance(watchedWallet.walletAddress);
         const spentSol = tradeEvent.solAmount;
         
         await this.updateMyBalance();
@@ -212,8 +267,18 @@ class TradeEngine {
         if(!tokenData) {
             tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
         }
+
+        let mcUSD = tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0;
+        if (!tokenData || !mcUSD) {
+            const dexData = await this.fetchTokenMetadataFallback(tradeEvent.mint);
+            if (dexData) {
+                if (!tokenData) tokenData = { name: dexData.name, symbol: dexData.symbol };
+                if (!mcUSD && dexData.marketCapUSD) mcUSD = dexData.marketCapUSD;
+            }
+        }
+
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
-        const mcTracker = tradeEvent.marketCapSol ? `$${(tradeEvent.marketCapSol * solanaService.getSolPriceUSD()).toFixed(2)}` : 'Unknown';
+        const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Unknown';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
 
         const telegramService = require('./telegram.service');

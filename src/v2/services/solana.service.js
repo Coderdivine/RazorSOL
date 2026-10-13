@@ -2,9 +2,16 @@ const { Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const WatchedWallet = require('../models/WatchedWallet');
 const { SOLANA_RPC_URL } = process.env;
 
+const BASE_MINTS = new Set([
+    'So11111111111111111111111111111111111111112', // WSOL
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
+]);
+
 class SolanaService {
     constructor() {
-        this.connection = new Connection(SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", 'confirmed');
+        this.rpcUrl = SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+        this.connection = new Connection(this.rpcUrl, 'confirmed');
         this.cachedSolPrice = 150;
         this.activeRpcSubscriptions = new Map();
         this.processedSignatures = new Set();
@@ -42,8 +49,160 @@ class SolanaService {
         return this.cachedSolPrice || 150;
     }
 
+    extractPubkeyString(keyEntry) {
+        if (!keyEntry) return '';
+        if (typeof keyEntry === 'string') return keyEntry;
+        if (typeof keyEntry.pubkey === 'string') return keyEntry.pubkey;
+        if (keyEntry.pubkey && typeof keyEntry.pubkey.toBase58 === 'function') {
+            return keyEntry.pubkey.toBase58();
+        }
+        if (typeof keyEntry.toBase58 === 'function') {
+            return keyEntry.toBase58();
+        }
+        return String(keyEntry);
+    }
+
+    extractUiTokenAmount(tokenBal) {
+        if (!tokenBal || !tokenBal.uiTokenAmount) return 0;
+        const val = tokenBal.uiTokenAmount.uiAmountString ?? tokenBal.uiTokenAmount.uiAmount ?? 0;
+        const num = Number(val);
+        return Number.isFinite(num) ? num : 0;
+    }
+
+    // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry & RPC fallback
+    async fetchParsedTransactionSafe(signature, maxRetries = 3) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const tx = await this.connection.getParsedTransaction(signature, {
+                    maxSupportedTransactionVersion: 1,
+                    commitment: 'confirmed'
+                });
+                if (tx && tx.meta) {
+                    return tx;
+                }
+            } catch (err) {
+                // Fallback to direct JSON-RPC getTransaction with maxSupportedTransactionVersion: 1
+                try {
+                    const res = await fetch(this.rpcUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: 1,
+                            method: 'getTransaction',
+                            params: [
+                                signature,
+                                {
+                                    encoding: 'jsonParsed',
+                                    commitment: 'confirmed',
+                                    maxSupportedTransactionVersion: 1
+                                }
+                            ]
+                        })
+                    });
+                    const data = await res.json();
+                    if (data && data.result && data.result.meta) {
+                        return data.result;
+                    }
+                } catch (rpcErr) {
+                    // Ignore fallback error and retry
+                }
+
+                if (attempt === maxRetries) {
+                    throw err;
+                }
+            }
+
+            // Wait briefly before retrying if transaction was not yet indexed
+            await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+        }
+        return null;
+    }
+
+    parseWalletTrade(tx, walletAddress, signature) {
+        if (!tx || !tx.meta || !tx.transaction || !tx.transaction.message) return null;
+
+        const accountKeys = tx.transaction.message.accountKeys || [];
+        const accountIndex = accountKeys.findIndex(
+            a => this.extractPubkeyString(a) === walletAddress
+        );
+
+        if (accountIndex === -1) return null;
+
+        const preSol = (tx.meta.preBalances?.[accountIndex] || 0) / LAMPORTS_PER_SOL;
+        const postSol = (tx.meta.postBalances?.[accountIndex] || 0) / LAMPORTS_PER_SOL;
+        const nativeSolDiff = preSol - postSol; // Positive when wallet spent native SOL
+
+        const preTokenBalances = tx.meta.preTokenBalances || [];
+        const postTokenBalances = tx.meta.postTokenBalances || [];
+
+        // Check Wrapped SOL (WSOL) balance change for this wallet
+        const wsolMint = 'So11111111111111111111111111111111111111112';
+        const preWsol = preTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === wsolMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const postWsol = postTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === wsolMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const wsolDiff = preWsol - postWsol; // Positive when wallet spent WSOL
+
+        const totalSolSpent = nativeSolDiff + wsolDiff;
+
+        // Collect all non-base token mints touched by this wallet
+        const walletMints = new Set();
+        preTokenBalances.forEach(b => {
+            if (b.owner === walletAddress && b.mint && !BASE_MINTS.has(b.mint)) {
+                walletMints.add(b.mint);
+            }
+        });
+        postTokenBalances.forEach(b => {
+            if (b.owner === walletAddress && b.mint && !BASE_MINTS.has(b.mint)) {
+                walletMints.add(b.mint);
+            }
+        });
+
+        for (const mint of walletMints) {
+            const preAmount = preTokenBalances
+                .filter(b => b.owner === walletAddress && b.mint === mint)
+                .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+            const postAmount = postTokenBalances
+                .filter(b => b.owner === walletAddress && b.mint === mint)
+                .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+
+            const tokenDiff = postAmount - preAmount;
+
+            // BUY: Token balance increased and SOL was spent
+            if (tokenDiff > 0 && totalSolSpent > 0.001) {
+                return {
+                    txType: 'buy',
+                    mint,
+                    solAmount: totalSolSpent,
+                    tokenAmount: tokenDiff,
+                    traderPublicKey: walletAddress,
+                    traderBalanceSol: preSol,
+                    signature
+                };
+            }
+
+            // SELL: Token balance decreased and SOL was received
+            if (tokenDiff < 0 && totalSolSpent < -0.001) {
+                return {
+                    txType: 'sell',
+                    mint,
+                    solAmount: Math.abs(totalSolSpent),
+                    tokenAmount: Math.abs(tokenDiff),
+                    traderPublicKey: walletAddress,
+                    traderBalanceSol: postSol,
+                    signature
+                };
+            }
+        }
+
+        return null;
+    }
+
     // Direct Solana Blockchain On-Chain Transaction Listener (Fallback & Dual-Engine)
-    async watchWalletOnRPC(walletAddress, onBuyCallback) {
+    async watchWalletOnRPC(walletAddress, onTradeCallback) {
         if (this.activeRpcSubscriptions.has(walletAddress)) {
             return; // Already watching on RPC
         }
@@ -68,51 +227,20 @@ class SolanaService {
                 console.log(`[SOLANA-RPC] ⚡ Transaction detected for ${walletAddress}! Sig: ${signature}`);
                 
                 try {
-                    // Fetch parsed transaction details
-                    const tx = await this.connection.getParsedTransaction(signature, {
-                        maxSupportedTransactionVersion: 0,
-                        commitment: 'confirmed'
-                    });
-                    
-                    if (!tx || !tx.meta) return;
-                    
-                    // Identify target wallet index in accounts
-                    const accountKeys = tx.transaction.message.accountKeys;
-                    const accountIndex = accountKeys.findIndex(
-                        a => (a.pubkey ? a.pubkey.toBase58() : a.toBase58()) === walletAddress
-                    );
-                    
-                    if (accountIndex === -1) return;
-                    
-                    const preSol = (tx.meta.preBalances[accountIndex] || 0) / LAMPORTS_PER_SOL;
-                    const postSol = (tx.meta.postBalances[accountIndex] || 0) / LAMPORTS_PER_SOL;
-                    const solDiff = preSol - postSol; // Positive if SOL was spent
-                    
-                    // Check if token balance increased (Buy action)
-                    const postTokenBalances = tx.meta.postTokenBalances || [];
-                    const preTokenBalances = tx.meta.preTokenBalances || [];
-                    
-                    const targetTokenGain = postTokenBalances.find(b => {
-                        const pre = preTokenBalances.find(p => p.accountIndex === b.accountIndex && p.mint === b.mint);
-                        const preAmount = pre ? (pre.uiTokenAmount.uiAmount || 0) : 0;
-                        const postAmount = b.uiTokenAmount.uiAmount || 0;
-                        return b.owner === walletAddress && postAmount > preAmount;
-                    });
-                    
-                    if (targetTokenGain && solDiff > 0.001) {
-                        const mint = targetTokenGain.mint;
-                        const spentSol = solDiff;
-                        console.log(`[SOLANA-RPC] 🎯 Whale Buy parsed on-chain! Mint: ${mint}, Spent: ${spentSol.toFixed(4)} SOL`);
-                        
-                        if (typeof onBuyCallback === 'function') {
-                            onBuyCallback({
-                                txType: 'buy',
-                                mint,
-                                solAmount: spentSol,
-                                traderPublicKey: walletAddress,
-                                signature
-                            });
-                        }
+                    const tx = await this.fetchParsedTransactionSafe(signature);
+                    if (!tx) return;
+
+                    const tradeEvent = this.parseWalletTrade(tx, walletAddress, signature);
+                    if (!tradeEvent) return;
+
+                    if (tradeEvent.txType === 'buy') {
+                        console.log(`[SOLANA-RPC] 🎯 Whale BUY parsed on-chain! Mint: ${tradeEvent.mint} | Spent: ${tradeEvent.solAmount.toFixed(4)} SOL`);
+                    } else if (tradeEvent.txType === 'sell') {
+                        console.log(`[SOLANA-RPC] 📉 Whale SELL parsed on-chain! Mint: ${tradeEvent.mint} | Received: ${tradeEvent.solAmount.toFixed(4)} SOL`);
+                    }
+
+                    if (typeof onTradeCallback === 'function') {
+                        onTradeCallback(tradeEvent);
                     }
                 } catch (txErr) {
                     console.warn(`[SOLANA-RPC] ⚠️ Error parsing tx ${signature}:`, txErr.message);
@@ -126,12 +254,12 @@ class SolanaService {
         }
     }
 
-    async syncAllWatchedWalletsOnRPC(onBuyCallback) {
+    async syncAllWatchedWalletsOnRPC(onTradeCallback) {
         try {
             const wallets = await WatchedWallet.find({ isActive: true });
             console.log(`[SOLANA-RPC] 🔍 Initializing on-chain monitoring for ${wallets.length} watched wallets...`);
             for (let w of wallets) {
-                await this.watchWalletOnRPC(w.walletAddress, onBuyCallback);
+                await this.watchWalletOnRPC(w.walletAddress, onTradeCallback);
             }
         } catch (e) {
             console.error('[SOLANA-RPC] ❌ Error syncing watched wallets:', e.message);
