@@ -214,9 +214,24 @@ class TelegramService {
             if (parts.length < 2) {
                 return this.handleListWallets(ctx);
             }
-            
             const wallet = parts[1].trim();
             await this.removeWalletFromWatch(ctx, wallet);
+        });
+
+        // Set Group Command (dynamically sets/links the alert channel)
+        this.bot.command(['setgroup', 'alertgroup', 'channel'], async (ctx) => {
+            const chatId = ctx.chat.id.toString();
+            this.configuredAlertChannel = chatId;
+            process.env.TELEGRAM_ALERTS_CHANNEL = chatId;
+            console.log(`[TELEGRAM] ✅ Alert group dynamically registered: ${chatId} (${ctx.chat.title || 'Direct/Group'})`);
+            ctx.reply(
+                `🔔 *Razor Alert Channel Connected!*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
+                `This chat has been set as the primary alert channel.\n\n` +
+                `• *Chat ID:* \`${chatId}\`\n` +
+                `• *Destination:* ${ctx.chat.title || 'Direct Alerts'}\n\n` +
+                `_Whale buys, whale sells, and Razor bot trades will now be posted here in real-time._`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
         });
     }
 
@@ -777,13 +792,48 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
         }).catch(() => {});
     }
 
-    sendAlert(message) {
+    async sendAlert(message) {
         if (!this.bot) return;
-        const channelId = process.env.TELEGRAM_ALERTS_CHANNEL;
-        if (channelId) {
-            console.log(`[TELEGRAM] 📤 Dispatching alert to channel (${channelId})`);
-            this.bot.telegram.sendMessage(channelId, message, { parse_mode: 'Markdown' })
-                .catch(err => console.error("[TELEGRAM] ❌ Alert Error:", err.message));
+
+        // Gather all target recipients
+        const targets = new Set();
+        if (this.configuredAlertChannel) targets.add(this.configuredAlertChannel);
+        if (process.env.TELEGRAM_ALERTS_CHANNEL) targets.add(process.env.TELEGRAM_ALERTS_CHANNEL);
+
+        // Also broadcast to users who registered watched wallets in DB
+        try {
+            const wallets = await WatchedWallet.find({ isActive: true });
+            wallets.forEach(w => {
+                if (w.addedBy && w.addedBy !== 'unknown' && w.addedBy !== 'inline') {
+                    targets.add(w.addedBy);
+                }
+            });
+        } catch {}
+
+        if (targets.size === 0) {
+            console.log("[TELEGRAM] ⚠️ No active alert channels or subscribers configured.");
+            return;
+        }
+
+        console.log(`[TELEGRAM] 📤 Dispatching alert to ${targets.size} recipient(s): [${[...targets].join(', ')}]`);
+
+        for (const targetId of targets) {
+            try {
+                await this.bot.telegram.sendMessage(targetId, message, {
+                    parse_mode: 'Markdown',
+                    disable_web_page_preview: false
+                });
+            } catch (err) {
+                // If markdown parse failed, try sending plain text
+                if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
+                    try {
+                        const plainText = message.replace(/[*_`\[\]()]/g, '');
+                        await this.bot.telegram.sendMessage(targetId, plainText);
+                    } catch {}
+                } else {
+                    console.warn(`[TELEGRAM] ⚠️ Alert dispatch notice for ${targetId}:`, err.message);
+                }
+            }
         }
     }
 }

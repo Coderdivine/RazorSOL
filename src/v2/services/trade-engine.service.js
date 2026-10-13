@@ -213,10 +213,15 @@ class TradeEngine {
     async evaluateMilestoneSnipe(token, currentMC_USD) {
         if(token.milestonesHit.includes(10000) && token.milestonesHit.includes(20000)) {
             const existing = await ActiveTrade.findOne({ mint: token.mint });
-            if(!existing) {
+            if(!existing && !token.hasSniped && !token.isSniping) {
+                token.isSniping = true;
                 console.log(`[TRADE-ENGINE] 🔫 Milestones $10k & $20k hit for ${token.mint}. Executing SNIPING logic to $50k!`);
-                const tradeAmountSol = 0.05; // Make this configurable
-                await this.executeTradeLocal(token.mint, "buy", tradeAmountSol, true, 0.002, "MILESTONE_SNIPE");
+                const tradeAmountSol = 0.05; // Default sniper size
+                const sig = await this.executeTradeLocal(token.mint, "buy", tradeAmountSol, true, 0.002, "MILESTONE_SNIPE");
+                if (sig) {
+                    token.hasSniped = true;
+                }
+                token.isSniping = false;
             }
         }
     }
@@ -330,7 +335,7 @@ class TradeEngine {
     async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false) {
         if(!this.myKeypair) {
             console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
-            return;
+            return null;
         }
         
         try {
@@ -344,19 +349,67 @@ class TradeEngine {
                 slippage: 15,
                 priorityFee,
                 pool: "auto"
+            }, {
+                responseType: 'arraybuffer'
             });
             
             if(response.status === 200) {
+                const buffer = Buffer.from(response.data);
+                
+                // Safety check: PumpPortal might return a JSON error string
+                const asText = buffer.toString('utf8');
+                if (asText.startsWith('{') && asText.includes('"error"')) {
+                    try {
+                        const errObj = JSON.parse(asText);
+                        console.error("[TRADE-ENGINE] ❌ PumpPortal API Error:", errObj.error || asText);
+                        return null;
+                    } catch {}
+                }
+
                 console.log(`[TRADE-ENGINE] 📝 Received raw transaction from PumpPortal. Signing...`);
-                const txBytes = new Uint8Array(response.data);
+                const txBytes = new Uint8Array(buffer);
                 const tx = VersionedTransaction.deserialize(txBytes);
                 tx.sign([this.myKeypair]);
                 
                 console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network...`);
-                const signature = await this.connection.sendTransaction(tx, { maxRetries: 3 });
-                console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
+                let signature;
+                try {
+                    signature = await this.connection.sendTransaction(tx, { maxRetries: 3 });
+                    console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
+                } catch (sendErr) {
+                    console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error:", sendErr.message);
+                    const telegramService = require('./telegram.service');
+                    if (sendErr.message.includes('Attempt to debit an account') || sendErr.message.includes('0x1') || sendErr.message.includes('insufficient')) {
+                        telegramService.sendAlert(
+                            `⚠️ *Trade Execution Notice — Insufficient SOL Balance*\n\n` +
+                            `Razor attempted to execute a *${action.toUpperCase()}* of \`${amount} SOL\` on \`${mint}\`.\n\n` +
+                            `💳 *Current Wallet Balance:* \`${this.myBalance.toFixed(4)} SOL\`\n` +
+                            `👉 *Action Needed:* Fund your bot wallet to execute on-chain trades: \`${this.myWalletKey}\``
+                        );
+                    }
+                    return null;
+                }
                 
+                const telegramService = require('./telegram.service');
+
                 if(action === "buy") {
+                    let tokenData = this.tokenCache.get(mint);
+                    const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+                    const modeDesc = source === 'COPY_TRADE' 
+                        ? `Mirrored Whale [\`${mirroredWallet ? mirroredWallet.substring(0,4)+'...'+mirroredWallet.substring(mirroredWallet.length-4) : 'Whale'}\`](https://solscan.io/account/${mirroredWallet})`
+                        : '🔫 5K Milestone Snipe ($10k ➔ $50k)';
+
+                    const buyAlert =
+`⚡ *RAZOR BOT BUY CONFIRMED* ⚡\n\n` +
+`🪙 *Token:* [${tokenName}](https://pump.fun/${mint})\n` +
+`🏷️ *CA:* \`${mint}\`\n` +
+`💰 *Buy Size:* \`${amount.toFixed(4)} SOL\`\n` +
+`🎯 *Mode:* ${modeDesc}\n` +
+`🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
+`📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`;
+
+                    telegramService.sendAlert(buyAlert);
+
                     if(isReentry && tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
                         trade.status = "REENTERED";
@@ -377,19 +430,34 @@ class TradeEngine {
                         const wsService = require('./pumpportal.service');
                         wsService.watchToken(mint);
                     }
-                } else if(action === "sell" && tradeId) {
-                     const trade = await ActiveTrade.findById(tradeId);
-                     if(trade.status !== "TP_TAKEN_WAITING_REENTRY") {
-                         trade.status = "CLOSED";
-                     }
-                     await trade.save();
-                     console.log(`[TRADE-ENGINE] 💾 Updated ActiveTrade record status to ${trade.status}.`);
+                } else if(action === "sell") {
+                    let tokenData = this.tokenCache.get(mint);
+                    const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+                    const sellAlert =
+`💸 *RAZOR BOT SELL CONFIRMED* 💸\n\n` +
+`🪙 *Token:* [${tokenName}](https://pump.fun/${mint})\n` +
+`🏷️ *CA:* \`${mint}\`\n` +
+`🎯 *Trigger:* ${isReentry ? 'Dip Re-entry Take Profit' : 'Take Profit (2x) / Stop Loss Guard'}\n` +
+`🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
+`📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`;
+
+                    telegramService.sendAlert(sellAlert);
+
+                    if(tradeId) {
+                        const trade = await ActiveTrade.findById(tradeId);
+                        if(trade.status !== "TP_TAKEN_WAITING_REENTRY") {
+                            trade.status = "CLOSED";
+                        }
+                        await trade.save();
+                        console.log(`[TRADE-ENGINE] 💾 Updated ActiveTrade record status to ${trade.status}.`);
+                    }
                 }
                 
                 return signature;
             }
         } catch(err) {
             console.error("[TRADE-ENGINE] ❌ Error executing trade:", err.response?.data || err.message);
+            return null;
         }
     }
 }
