@@ -71,6 +71,10 @@ class TelegramService {
             console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
         }
 
+        this.bot.catch((err, ctx) => {
+            console.warn(`[TELEGRAM] ⚠️ Error handling update:`, err.message);
+        });
+
         // Resilient bot launcher with automatic reconnection on 409 conflict or network dropout
         const launchBot = async (retryCount = 0) => {
             try {
@@ -80,6 +84,7 @@ class TelegramService {
                 console.log("[TELEGRAM] 🚀 Telegraf polling engine active and listening.");
             } catch (err) {
                 console.error(`[TELEGRAM] ❌ Bot launch error (attempt ${retryCount + 1}):`, err.message);
+                try { this.bot.stop(); } catch {}
                 const delay = Math.min(25000, 3000 * Math.pow(1.5, retryCount));
                 console.log(`[TELEGRAM] 🔄 Auto-reconnecting bot in ${Math.round(delay / 1000)}s...`);
                 setTimeout(() => launchBot(retryCount + 1), delay);
