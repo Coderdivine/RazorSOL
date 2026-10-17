@@ -22,9 +22,13 @@ class PumpPortalService {
             console.log("[PUMPPORTAL] ✅ Successfully connected to WebSocket.");
             this.reconnectAttempts = 0;
             
-            // Subscribe to new tokens (Free stream)
-            console.log("[PUMPPORTAL] 📡 Subscribing to new token creation stream...");
-            this.ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+            // Check if Early CA discovery is enabled before subscribing
+            if (tradeEngine.earlyCADiscoveryEnabled) {
+                console.log("[PUMPPORTAL] 📡 Subscribing to new token creation stream...");
+                this.ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+            } else {
+                console.log("[PUMPPORTAL] ⏸️ Early CA Discovery is currently DISABLED. Skipping new token stream.");
+            }
             
             // Sync watched wallets on PumpPortal
             await this.syncWatchedWallets();
@@ -113,6 +117,21 @@ class PumpPortalService {
         });
     }
     
+    // Enable/disable Early CA stream dynamically
+    enableEarlyCADiscovery() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log("[PUMPPORTAL] 📡 Subscribing to new token creation stream...");
+            this.ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+        }
+    }
+
+    disableEarlyCADiscovery() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log("[PUMPPORTAL] 🛑 Unsubscribing from new token creation stream...");
+            this.ws.send(JSON.stringify({ method: "unsubscribeNewToken" }));
+        }
+    }
+
     // Add token to stream dynamically
     watchToken(mint) {
          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -140,6 +159,7 @@ class PumpPortalService {
         }
 
         if (msg.txType === "create") {
+            if (!tradeEngine.earlyCADiscoveryEnabled) return;
             console.log(`[PUMPPORTAL] 🪙 New token created: ${msg.mint} (Initial MC: ${msg.marketCapSol || 0} SOL)`);
             await tradeEngine.handleNewToken(msg);
         } else if (msg.txType === "buy" || msg.txType === "sell") {

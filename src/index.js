@@ -47,7 +47,9 @@ const server = app.listen(PORT, async () => {
   console.log(`:::> Server listening on port ${PORT} http://localhost:${PORT}`);
   
   // Wait a brief moment for DB to connect before starting bots
-  setTimeout(() => {
+  setTimeout(async () => {
+      const tradeEngine = require('./v2/services/trade-engine.service');
+      await tradeEngine.loadSettings();
       telegramService.init();
       pumpPortalService.connect();
   }, 3000);

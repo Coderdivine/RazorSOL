@@ -35,10 +35,71 @@ class TradeEngine {
             this.tokenCache.clear();
         }, 3600000);
         
-        // Constants for logic
+        // Settings & Thresholds
+        this.earlyCADiscoveryEnabled = false; // Disabled by default per user request
+        this.watchlistThresholdUSD = 10000; // Increased to $10,000 USD per user request
         this.MILESTONES = [10000, 20000, 30000, 40000, 50000, 60000, 70000];
         this.STOP_LOSS_FACTOR = 1.2; // 20% drop from entry
         this.TAKE_PROFIT_FACTOR = 2.0; // 2x gain
+    }
+
+    async loadSettings() {
+        try {
+            const BotSettings = require('../models/BotSettings');
+            let settings = await BotSettings.findOne({ key: "global" });
+            if (!settings) {
+                settings = await BotSettings.create({
+                    key: "global",
+                    earlyCADiscoveryEnabled: false,
+                    watchlistThresholdUSD: 10000
+                });
+            }
+            this.earlyCADiscoveryEnabled = settings.earlyCADiscoveryEnabled;
+            this.watchlistThresholdUSD = settings.watchlistThresholdUSD || 10000;
+            console.log(`[TRADE-ENGINE] ⚙️ Loaded Settings: Early CA Discovery=${this.earlyCADiscoveryEnabled ? 'ENABLED' : 'DISABLED'} | Threshold=$${this.watchlistThresholdUSD} USD`);
+        } catch (e) {
+            console.warn("[TRADE-ENGINE] ⚠️ Could not load settings from DB:", e.message);
+        }
+    }
+
+    async setEarlyCADiscovery(enabled) {
+        this.earlyCADiscoveryEnabled = Boolean(enabled);
+        const wsService = require('./pumpportal.service');
+        if (this.earlyCADiscoveryEnabled) {
+            wsService.enableEarlyCADiscovery();
+        } else {
+            wsService.disableEarlyCADiscovery();
+        }
+        try {
+            const BotSettings = require('../models/BotSettings');
+            await BotSettings.findOneAndUpdate(
+                { key: "global" },
+                { earlyCADiscoveryEnabled: this.earlyCADiscoveryEnabled },
+                { upsert: true, new: true }
+            );
+        } catch (e) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error saving earlyCADiscovery to DB:", e.message);
+        }
+        return this.earlyCADiscoveryEnabled;
+    }
+
+    async setWatchlistThreshold(amountUSD) {
+        const val = Number(amountUSD);
+        if (isNaN(val) || val < 1000) {
+            throw new Error("Threshold must be a valid number of at least $1,000 USD.");
+        }
+        this.watchlistThresholdUSD = val;
+        try {
+            const BotSettings = require('../models/BotSettings');
+            await BotSettings.findOneAndUpdate(
+                { key: "global" },
+                { watchlistThresholdUSD: this.watchlistThresholdUSD },
+                { upsert: true, new: true }
+            );
+        } catch (e) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error saving watchlistThreshold to DB:", e.message);
+        }
+        return this.watchlistThresholdUSD;
     }
 
     async updateMyBalance() {
@@ -49,6 +110,8 @@ class TradeEngine {
     }
 
     async handleNewToken(msg) {
+        if (!this.earlyCADiscoveryEnabled) return;
+
         const mint = msg.mint;
         const initialMC = msg.marketCapSol || 0; 
         const mcUSD = initialMC * solanaService.getSolPriceUSD();
@@ -67,8 +130,8 @@ class TradeEngine {
             isSavedToDB: false
         });
 
-        // If the token already launched at >= $5,000 MC, evaluate & save immediately
-        if (mcUSD >= 5000) {
+        // If the token already launched at >= watchlistThresholdUSD MC, evaluate & save immediately
+        if (mcUSD >= this.watchlistThresholdUSD) {
             await this.updateTokenMilestones(mint, initialMC);
         }
 
@@ -168,9 +231,9 @@ class TradeEngine {
         
         const currentMC_USD = currentMC * solanaService.getSolPriceUSD();
 
-        // 🚨 NEW LOGIC: Only save new tokens to permanent DB if they hit $5,000 MC 🚨
-        if(currentMC_USD >= 5000 && !token.isSavedToDB) {
-            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $5k MC ($${currentMC_USD.toFixed(2)})! Saving to permanent DB watchlist.`);
+        // Only save new tokens to permanent DB if they hit the watchlist threshold (default $10,000 MC)
+        if(currentMC_USD >= this.watchlistThresholdUSD && !token.isSavedToDB) {
+            console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $${Math.round(this.watchlistThresholdUSD / 1000)}k MC ($${currentMC_USD.toFixed(2)})! Saving to permanent DB watchlist.`);
             token.isSavedToDB = true;
             updated = true;
             try {

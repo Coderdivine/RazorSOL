@@ -52,6 +52,8 @@ class TelegramService {
                 { command: 'positions', description: '💼 View Open Positions & Trade History' },
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
                 { command: 'profile', description: '🤖 Bot Profile, Strategy & Live Status' },
+                { command: 'earlyca', description: '⚙️ Toggle Early CA Discovery: /earlyca [on|off]' },
+                { command: 'threshold', description: '🎯 Set Watchlist Threshold: /threshold <amount>' },
                 { command: 'address', description: '💳 Bot Trading Wallet Address & Balance' },
                 { command: 'wallet', description: '💳 View Bot Trading Wallet (Alias)' },
                 { command: 'list', description: '👁️ Active Monitored Whale Wallets' },
@@ -94,17 +96,18 @@ class TelegramService {
     getPersistentKeyboard() {
         return Markup.keyboard([
             ['📊 /stats', '💼 /positions'],
-            ['🤖 /profile', '💳 /address'],
-            ['📜 /list', '🎯 /watch'],
-            ['📖 /help']
+            ['🤖 /profile', '⚙️ /earlyca'],
+            ['💳 /address', '📜 /list'],
+            ['🎯 /watch', '📖 /help']
         ]).resize().persistent().placeholder('💡 Type / or tap a command below...');
     }
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
             [Markup.button.callback('💼 Active Positions', 'action_positions'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
-            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
-            [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📖 Strategy Guide', 'action_help')]
+            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('⚙️ Early CA Discovery', 'action_earlyca_menu')],
+            [Markup.button.callback('💳 Bot Address', 'action_address'), Markup.button.callback('📜 Monitored Wallets', 'action_list')],
+            [Markup.button.callback('📖 Strategy Guide', 'action_help')]
         ]);
     }
 
@@ -128,9 +131,9 @@ class TelegramService {
     getHelpCategoryButtons() {
         return Markup.inlineKeyboard([
             [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
-            [Markup.button.callback('🎯 Copy Trading Engine', 'help_cat_copy'), Markup.button.callback('🔫 5K Milestone Sniper', 'help_cat_sniper')],
+            [Markup.button.callback('🎯 Copy Trading Engine', 'help_cat_copy'), Markup.button.callback('🔫 Milestone Sniper', 'help_cat_sniper')],
             [Markup.button.callback('🛡️ Risk & Anti-Rug Guard', 'help_cat_risk'), Markup.button.callback('💼 Wallet Management', 'help_cat_wallets')],
-            [Markup.button.callback('📊 Analytics Terminal', 'help_cat_stats'), Markup.button.callback('⚡ Main Dashboard', 'action_stats')]
+            [Markup.button.callback('⚙️ Early CA Settings', 'action_earlyca_menu'), Markup.button.callback('📊 Analytics Terminal', 'help_cat_stats')]
         ]);
     }
 
@@ -238,6 +241,18 @@ class TelegramService {
             await this.removeWalletFromWatch(ctx, wallet);
         });
 
+        // Early CA Command (with /sniper alias)
+        this.bot.command(['earlyca', 'sniper'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /earlyca command from user: ${ctx.chat.id}`);
+            await this.handleEarlyCACommand(ctx);
+        });
+
+        // Threshold Command
+        this.bot.command(['threshold', 'setthreshold'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /threshold command from user: ${ctx.chat.id}`);
+            await this.handleThresholdCommand(ctx);
+        });
+
         // Set Group Command (dynamically sets/links the alert channel)
         this.bot.command(['setgroup', 'alertgroup', 'channel'], async (ctx) => {
             const chatId = ctx.chat.id.toString();
@@ -270,6 +285,11 @@ class TelegramService {
         this.bot.hears([/^\s*🤖\s*(\/)?profile/i, /^\s*profile(s)?\b/i, /^\s*status\b/i, /^\s*config\b/i], async (ctx) => {
             console.log(`[TELEGRAM] 📥 Route: profile from user: ${ctx.chat.id}`);
             await this.handleBotProfile(ctx);
+        });
+
+        this.bot.hears([/^\s*⚙️\s*(\/)?earlyca/i, /^\s*earlyca\b/i, /^\s*sniper\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: earlyca from user: ${ctx.chat.id}`);
+            await this.handleEarlyCACommand(ctx);
         });
 
         this.bot.hears([/^\s*💳\s*(\/)?address/i, /^\s*address\b/i, /^\s*wallet\b/i, /^\s*balance\b/i, /^\s*sol\b/i], async (ctx) => {
@@ -324,6 +344,20 @@ To track a whale and mirror trades proportionally, send:
                 },
                 {
                     type: 'article',
+                    id: 'cmd_earlyca',
+                    title: '⚙️ /earlyca — Early CA Discovery Toggle',
+                    description: 'Toggle automatic new token discovery (on/off)',
+                    input_message_content: { message_text: '/earlyca' }
+                },
+                {
+                    type: 'article',
+                    id: 'cmd_threshold',
+                    title: '🎯 /threshold — Set Watchlist Gate',
+                    description: 'Set minimum MC threshold (e.g. /threshold 10000)',
+                    input_message_content: { message_text: '/threshold 10000' }
+                },
+                {
+                    type: 'article',
                     id: 'cmd_address',
                     title: '💳 /address — Bot Trading Wallet',
                     description: 'View trading wallet address and live SOL balance',
@@ -340,7 +374,7 @@ To track a whale and mirror trades proportionally, send:
                     type: 'article',
                     id: 'cmd_help',
                     title: '📖 /help — Strategy & Architecture Guide',
-                    description: 'Interactive breakdown of 5K gate, milestone sniping, and risk rules',
+                    description: 'Interactive breakdown of 10K gate, milestone sniping, and risk rules',
                     input_message_content: { message_text: '/help' }
                 }
             ];
@@ -371,6 +405,8 @@ I didn't recognize that command. Here are quick shortcuts you can use:
 
 • \`/stats\` — 📊 View live PnL, win rate & chart
 • \`/profile\` — 🤖 View bot strategy & live status
+• \`/earlyca [on|off]\` — ⚙️ Toggle new token discovery
+• \`/threshold <amount>\` — 🎯 Set watchlist Market Cap gate (e.g. 10000)
 • \`/address\` — 💳 View bot trading wallet & balance
 • \`/list\` — 📜 View active monitored whale wallets
 • \`/watch <address>\` — 🎯 Mirror a whale wallet
@@ -383,8 +419,8 @@ _Tap any button below or use the pinned menu at the bottom:_`;
                 parse_mode: 'Markdown',
                 reply_markup: Markup.inlineKeyboard([
                     [Markup.button.callback('📊 /stats', 'action_stats'), Markup.button.callback('🤖 /profile', 'action_profile')],
-                    [Markup.button.callback('💳 /address', 'action_address'), Markup.button.callback('📜 /list', 'action_list')],
-                    [Markup.button.callback('📖 /help', 'action_help')]
+                    [Markup.button.callback('⚙️ /earlyca', 'action_earlyca_menu'), Markup.button.callback('💳 /address', 'action_address')],
+                    [Markup.button.callback('📜 /list', 'action_list'), Markup.button.callback('📖 /help', 'action_help')]
                 ]).reply_markup
             }).catch(() => {});
         });
@@ -529,6 +565,25 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             this.handleStats(ctx, '1m');
         });
 
+        this.bot.action('action_earlyca_menu', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            await this.showEarlyCAStatus(ctx);
+        });
+
+        this.bot.action('action_toggle_earlyca_on', async (ctx) => {
+            const tradeEngine = require('./trade-engine.service');
+            await tradeEngine.setEarlyCADiscovery(true);
+            await ctx.answerCbQuery('Early CA Discovery Enabled!').catch(() => {});
+            await this.showEarlyCAStatus(ctx);
+        });
+
+        this.bot.action('action_toggle_earlyca_off', async (ctx) => {
+            const tradeEngine = require('./trade-engine.service');
+            await tradeEngine.setEarlyCADiscovery(false);
+            await ctx.answerCbQuery('Early CA Discovery Paused.').catch(() => {});
+            await this.showEarlyCAStatus(ctx);
+        });
+
         // Dynamic One-Tap Watch & Unwatch callback actions
         this.bot.action(/^watch:(.+)$/, async (ctx) => {
             const wallet = ctx.match[1];
@@ -557,9 +612,13 @@ _Tap any button below or use the pinned menu at the bottom:_`;
 
         this.bot.action('help_cat_sniper', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
-            const text = `🔫 *5K MILESTONE SNIPER STRATEGY*\n` +
+            const tradeEngine = require('./trade-engine.service');
+            const threshK = Math.round(tradeEngine.watchlistThresholdUSD / 1000);
+            const isEnabled = tradeEngine.earlyCADiscoveryEnabled;
+            const text = `🔫 *MILESTONE SNIPER STRATEGY*\n` +
                          `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `• *5K Market Cap Gate:* Newly launched meme tokens start around ~$4.5k. Razor only saves tokens that successfully cross *$5,000 USD Market Cap* to avoid zero-volume rugs.\n` +
+                         `• *${threshK}K Market Cap Gate:* Newly launched meme tokens start around ~$4.5k. Razor only saves tokens that successfully cross *$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD Market Cap* to avoid zero-volume rugs.\n` +
+                         `• *Early CA Control:* Currently ${isEnabled ? '🟢 ACTIVE' : '🔴 PAUSED'}. Easily toggle using \`/earlyca on\` or \`/earlyca off\`.\n` +
                          `• *Milestone Progression:* If a token crosses 10k and 20k MC consecutively, momentum probability spikes. Razor snipes the coin targeting the 50k progression.\n` +
                          `• *In-Memory Caching:* Token evaluation runs in RAM memory to execute sub-millisecond entry before bonding curve surges.`;
             ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
@@ -697,6 +756,109 @@ _Send SOL to the address above to fund autonomous copy-trading and milestone sni
         }
     }
 
+    async handleEarlyCACommand(ctx) {
+        const text = (ctx.message?.text || '').trim();
+        const parts = text.split(/\s+/);
+        const sub = parts[1]?.toLowerCase();
+        const tradeEngine = require('./trade-engine.service');
+
+        if (sub === 'on' || sub === 'enable' || sub === '1' || sub === 'true') {
+            await tradeEngine.setEarlyCADiscovery(true);
+            const msg = `🟢 *Early CA Discovery is now ENABLED!*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `• Razor is actively listening to newly launched tokens.\n` +
+                        `• Watchlist Gate Threshold: *$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD*\n\n` +
+                        `_Tokens reaching $${Math.round(tradeEngine.watchlistThresholdUSD / 1000)}k MC will be saved to your DB watchlist and tracked for 10k ➔ 20k ➔ 50k milestone snipes._`;
+            return ctx.reply(msg, { parse_mode: 'Markdown', ...this.getEarlyCAButtons(true) }).catch(() => {});
+        } else if (sub === 'off' || sub === 'disable' || sub === '0' || sub === 'false') {
+            await tradeEngine.setEarlyCADiscovery(false);
+            const msg = `🔴 *Early CA Discovery is now DISABLED!*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `• Razor has paused listening to newly launched tokens.\n` +
+                        `• *Copy-trading remains 100% active* on your watched whale wallets.\n` +
+                        `• No untargeted token alerts or spam will be processed.\n\n` +
+                        `_You can re-enable anytime using_ \`/earlyca on\` _or the button below._`;
+            return ctx.reply(msg, { parse_mode: 'Markdown', ...this.getEarlyCAButtons(false) }).catch(() => {});
+        }
+
+        // No param provided: show current status with 1-tap toggle buttons
+        await this.showEarlyCAStatus(ctx);
+    }
+
+    async showEarlyCAStatus(ctx) {
+        const tradeEngine = require('./trade-engine.service');
+        const isEnabled = tradeEngine.earlyCADiscoveryEnabled;
+        const statusBadge = isEnabled ? '🟢 ACTIVE (Listening to New Launches)' : '🔴 PAUSED (Zero Token Spam)';
+        const threshold = tradeEngine.watchlistThresholdUSD;
+
+        const text =
+`⚙️ *EARLY CA DISCOVERY & WATCHLIST GATE*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• *Status:* ${statusBadge}
+• *Watchlist Gate:* \`$${threshold.toLocaleString()} USD\`
+• *Milestone Sniper Progression:* \`$10k ➔ $20k ➔ $50k\`
+• *Whale Copy-Trading:* 🟢 Always Active
+
+💡 *Description:*
+When enabled, Razor listens to PumpPortal for newly created tokens and tracks their market cap. Tokens reaching *$${Math.round(threshold / 1000)}k MC* are registered to your permanent DB watchlist.
+
+When disabled, Razor ignores untargeted token launches, conserving bandwidth and eliminating spam notifications while *still mirroring all watched whale wallets*.
+
+*Commands:*
+• \`/earlyca on\` — Enable early token discovery
+• \`/earlyca off\` — Pause early token discovery
+• \`/threshold <amount>\` — Set watchlist gate (current: $${threshold.toLocaleString()})`;
+
+        const buttons = this.getEarlyCAButtons(isEnabled);
+        if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', ...buttons }).catch(async () => {
+                await ctx.reply(text, { parse_mode: 'Markdown', ...buttons }).catch(() => {});
+            });
+        } else {
+            await ctx.reply(text, { parse_mode: 'Markdown', ...buttons }).catch(() => {});
+        }
+    }
+
+    getEarlyCAButtons(isEnabled) {
+        const toggleBtn = isEnabled
+            ? Markup.button.callback('🔴 Turn OFF Early CA', 'action_toggle_earlyca_off')
+            : Markup.button.callback('🟢 Turn ON Early CA', 'action_toggle_earlyca_on');
+
+        return Markup.inlineKeyboard([
+            [toggleBtn],
+            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('📊 Performance Terminal', 'action_stats')]
+        ]);
+    }
+
+    async handleThresholdCommand(ctx) {
+        const text = (ctx.message?.text || '').trim();
+        const parts = text.split(/\s+/);
+        const tradeEngine = require('./trade-engine.service');
+
+        if (parts.length < 2) {
+            return ctx.reply(
+                `🎯 *WATCHLIST MARKET CAP THRESHOLD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                `Current Watchlist Gate: *$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD*\n\n` +
+                `*Usage:*\n\`/threshold <amount_usd>\`\n\n` +
+                `*Example:*\n\`/threshold 10000\` (sets gate to $10k)\n\`/threshold 15000\` (sets gate to $15k)`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
+        }
+
+        const amount = parseFloat(parts[1].replace(/[^0-9.]/g, ''));
+        if (isNaN(amount) || amount < 1000) {
+            return ctx.reply(`❌ *Invalid Amount:* Please specify a minimum threshold of $1,000 USD (e.g. \`/threshold 10000\`).`, { parse_mode: 'Markdown' }).catch(() => {});
+        }
+
+        try {
+            await tradeEngine.setWatchlistThreshold(amount);
+            const msg = `✅ *Watchlist Gate Updated!*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `New Gate Threshold: *$${amount.toLocaleString()} USD*\n\n` +
+                        `_Only tokens reaching at least $${amount.toLocaleString()} MC will be saved to your permanent DB watchlist._`;
+            ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => {});
+        } catch (err) {
+            ctx.reply(`❌ Error setting threshold: ${err.message}`).catch(() => {});
+        }
+    }
+
     async handleBotProfile(ctx) {
         try {
             const walletAddress = WALLET_PUBLIC_KEY || 'Not Configured';
@@ -711,6 +873,10 @@ _Send SOL to the address above to fund autonomous copy-trading and milestone sni
                 ActiveTrade.countDocuments({ status: { $in: ['OPEN', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).catch(() => 0),
                 ActiveTrade.countDocuments({ status: 'CLOSED' }).catch(() => 0)
             ]);
+
+            const tradeEngine = require('./trade-engine.service');
+            const earlyCAStatus = tradeEngine.earlyCADiscoveryEnabled ? '🟢 Enabled' : '🔴 Disabled (Zero Spam)';
+            const watchlistGate = `$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD`;
 
             const solPrice = solanaService.getSolPriceUSD();
             const usdBalance = (solBalance * solPrice).toFixed(2);
@@ -741,7 +907,8 @@ _Send SOL to the address above to fund autonomous copy-trading and milestone sni
 • *Slippage / Priority:* \`15%\` Slippage • Local Signing
 
 🔫 *Sniper & Risk Profile:*
-• *Watchlist Gate:* \`> $5,000 USD\` Market Cap
+• *Early CA Discovery:* \`${earlyCAStatus}\`
+• *Watchlist Gate:* \`> ${watchlistGate}\` Market Cap
 • *Snipe Progression:* \`$10k ➔ $20k ➔ $50k\` MC
 • *Take Profit (TP):* \`2.0x (+100%)\` + \`50%\` Dip Re-entry
 • *Stop Loss (SL):* \`1.2x (-16.7%)\` Hard Protection
@@ -749,13 +916,14 @@ _Send SOL to the address above to fund autonomous copy-trading and milestone sni
 
 📊 *Live State Summary:*
 • *Monitored Whales:* \`${watchedCount}\`
-• *5K+ Watchlist Coins:* \`${trackedTokensCount}\`
+• *Watchlist Coins:* \`${trackedTokensCount}\`
 • *Active Positions:* \`${openTradesCount}\` | *Settled:* \`${closedTradesCount}\`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
             const buttons = Markup.inlineKeyboard([
-                [Markup.button.callback('💳 Bot Address', 'action_address'), Markup.button.callback('📊 Performance Chart', 'action_stats')],
-                [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('🔄 Refresh Profile', 'action_profile')]
+                [Markup.button.callback('⚙️ Early CA Toggle', 'action_earlyca_menu'), Markup.button.callback('💳 Bot Address', 'action_address')],
+                [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📊 Performance Chart', 'action_stats')],
+                [Markup.button.callback('🔄 Refresh Profile', 'action_profile')]
             ]);
 
             if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
