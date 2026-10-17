@@ -337,6 +337,22 @@ class TradeEngine {
             console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
             return null;
         }
+
+        await this.updateMyBalance();
+        if (action === "buy" && this.myBalance < 0.005) {
+            console.log(`[TRADE-ENGINE] ⚠️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast.`);
+            const telegramService = require('./telegram.service');
+            if (!this.lastLowBalanceAlert || Date.now() - this.lastLowBalanceAlert > 300000) {
+                this.lastLowBalanceAlert = Date.now();
+                telegramService.sendAlert(
+                    `⚠️ *Trade Notice — Insufficient SOL Balance*\n\n` +
+                    `Razor detected a buy opportunity on \`${mint}\` (${source === 'COPY_TRADE' ? 'Whale Mirror' : '5K Milestone Snipe'}).\n\n` +
+                    `💳 *Current Wallet Balance:* \`${this.myBalance.toFixed(4)} SOL\`\n` +
+                    `👉 *Action Needed:* Deposit SOL to your bot address to execute live on-chain trades:\n\`${this.myWalletKey}\``
+                );
+            }
+            return null;
+        }
         
         try {
             console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} payload to PumpPortal for ${mint}`);

@@ -49,6 +49,7 @@ class TelegramService {
         try {
             const commands = [
                 { command: 'start', description: '⚡ Open Main Trading Terminal & Controls' },
+                { command: 'positions', description: '💼 View Open Positions & Trade History' },
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
                 { command: 'profile', description: '🤖 Bot Profile, Strategy & Live Status' },
                 { command: 'address', description: '💳 Bot Trading Wallet Address & Balance' },
@@ -68,10 +69,22 @@ class TelegramService {
             console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
         }
 
-        // Launch the bot gracefully
-        this.bot.launch().catch(err => {
-            console.error("[TELEGRAM] ❌ Failed to launch bot:", err.message);
-        });
+        // Resilient bot launcher with automatic reconnection on 409 conflict or network dropout
+        const launchBot = async (retryCount = 0) => {
+            try {
+                // Clear any lingering webhook or stale polling lock
+                await this.bot.telegram.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
+                await this.bot.launch();
+                console.log("[TELEGRAM] 🚀 Telegraf polling engine active and listening.");
+            } catch (err) {
+                console.error(`[TELEGRAM] ❌ Bot launch error (attempt ${retryCount + 1}):`, err.message);
+                const delay = Math.min(25000, 3000 * Math.pow(1.5, retryCount));
+                console.log(`[TELEGRAM] 🔄 Auto-reconnecting bot in ${Math.round(delay / 1000)}s...`);
+                setTimeout(() => launchBot(retryCount + 1), delay);
+            }
+        };
+
+        launchBot();
 
         // Enable graceful stop
         process.once('SIGINT', () => this.bot && this.bot.stop('SIGINT'));
@@ -80,17 +93,18 @@ class TelegramService {
 
     getPersistentKeyboard() {
         return Markup.keyboard([
-            ['📊 /stats', '🤖 /profile'],
-            ['💳 /address', '📜 /list'],
-            ['🎯 /watch', '📖 /help']
+            ['📊 /stats', '💼 /positions'],
+            ['🤖 /profile', '💳 /address'],
+            ['📜 /list', '🎯 /watch'],
+            ['📖 /help']
         ]).resize().persistent().placeholder('💡 Type / or tap a command below...');
     }
 
     getMenuButtons() {
         return Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Active Positions', 'action_positions'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
             [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
-            [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
-            [Markup.button.callback('📖 Strategy & Architecture Guide', 'action_help')]
+            [Markup.button.callback('📜 Monitored Wallets', 'action_list'), Markup.button.callback('📖 Strategy Guide', 'action_help')]
         ]);
     }
 
@@ -173,6 +187,12 @@ class TelegramService {
              this.handleStats(ctx, '1d');
         });
 
+        // Positions Command (with /trades alias)
+        this.bot.command(['positions', 'trades', 'orders'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /positions command from user: ${ctx.chat.id}`);
+            await this.handlePositions(ctx);
+        });
+
         // Watch Command
         this.bot.command('watch', async (ctx) => {
             console.log(`[TELEGRAM] 📥 Received /watch command from user: ${ctx.chat.id}`);
@@ -240,6 +260,11 @@ class TelegramService {
         this.bot.hears([/^\s*📊\s*(\/)?stats/i, /^\s*stats\b/i, /^\s*pnl\b/i, /^\s*chart\b/i], async (ctx) => {
             console.log(`[TELEGRAM] 📥 Route: stats from user: ${ctx.chat.id}`);
             await this.handleStats(ctx, '1d');
+        });
+
+        this.bot.hears([/^\s*💼\s*(\/)?position(s)?/i, /^\s*position(s)?\b/i, /^\s*trades?\b/i, /^\s*orders?\b/i], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Route: positions from user: ${ctx.chat.id}`);
+            await this.handlePositions(ctx);
         });
 
         this.bot.hears([/^\s*🤖\s*(\/)?profile/i, /^\s*profile(s)?\b/i, /^\s*status\b/i, /^\s*config\b/i], async (ctx) => {
@@ -479,6 +504,11 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             this.sendHelpMessage(ctx);
         });
 
+        this.bot.action('action_positions', async (ctx) => {
+            await ctx.answerCbQuery('Loading positions...').catch(() => {});
+            await this.handlePositions(ctx);
+        });
+
         this.bot.action('action_stats', async (ctx) => {
             await ctx.answerCbQuery('Fetching live terminal metrics...').catch(() => {});
             this.handleStats(ctx, '1d');
@@ -568,6 +598,60 @@ _Tap any button below or use the pinned menu at the bottom:_`;
                          `• *Offline Engine:* Charts are generated locally as native high-resolution images in 20ms without relying on external image servers.`;
             ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
         });
+    }
+
+    async handlePositions(ctx) {
+        try {
+            const [openTrades, recentClosed] = await Promise.all([
+                ActiveTrade.find({ status: { $in: ['OPEN', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
+                ActiveTrade.find({ status: 'CLOSED' }).sort({ updatedAt: -1 }).limit(5)
+            ]);
+
+            let text = `💼 *RAZOR ACTIVE POSITIONS & TRADES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+            if (openTrades.length === 0) {
+                text += `🟢 *Active Positions:* None currently open.\n\n` +
+                        `_Razor enters trades automatically when monitored whales buy or tokens hit 5K milestone progression ($10k ➔ $20k ➔ $50k)._\n\n`;
+            } else {
+                text += `🟢 *Active Open Positions (${openTrades.length}):*\n`;
+                openTrades.forEach((t, i) => {
+                    const shortMint = `${t.mint.substring(0, 6)}...${t.mint.substring(t.mint.length - 6)}`;
+                    const statusBadge = t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken • Watching Dip' : '⚡ Open');
+                    text += `${i + 1}. *${t.tokenName || 'Token'}* (\`${shortMint}\`)\n` +
+                            `   • *Status:* ${statusBadge}\n` +
+                            `   • *Invested:* \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\`\n` +
+                            `   • *Source:* ${t.source === 'COPY_TRADE' ? '🎯 Whale Mirror' : '🔫 5K Milestone Snipe'}\n` +
+                            `   • *Links:* [Pump.fun](https://pump.fun/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
+                });
+            }
+
+            if (recentClosed.length > 0) {
+                text += `🏁 *Recently Settled Trades (${recentClosed.length}):*\n`;
+                recentClosed.forEach((t, i) => {
+                    const shortMint = `${t.mint.substring(0, 4)}...${t.mint.substring(t.mint.length - 4)}`;
+                    text += `${i + 1}. [\`${shortMint}\`](https://pump.fun/${t.mint}) • \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` • ${t.source}\n`;
+                });
+                text += `\n`;
+            }
+
+            text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+            const buttons = Markup.inlineKeyboard([
+                [Markup.button.callback('🔄 Refresh Positions', 'action_positions'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
+                [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')]
+            ]);
+
+            if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
+                await ctx.editMessageText(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(async () => {
+                    await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+                });
+            } else {
+                await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(() => {});
+            }
+        } catch (err) {
+            console.error("[TELEGRAM] ❌ Error in handlePositions:", err.message);
+            ctx.reply("❌ Error fetching active positions.").catch(() => {});
+        }
     }
 
     async handleBotAddress(ctx) {
