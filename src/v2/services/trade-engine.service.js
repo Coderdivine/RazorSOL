@@ -340,17 +340,7 @@ class TradeEngine {
 
         await this.updateMyBalance();
         if (action === "buy" && this.myBalance < 0.005) {
-            console.log(`[TRADE-ENGINE] ⚠️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast.`);
-            const telegramService = require('./telegram.service');
-            if (!this.lastLowBalanceAlert || Date.now() - this.lastLowBalanceAlert > 300000) {
-                this.lastLowBalanceAlert = Date.now();
-                telegramService.sendAlert(
-                    `⚠️ *Trade Notice — Insufficient SOL Balance*\n\n` +
-                    `Razor detected a buy opportunity on \`${mint}\` (${source === 'COPY_TRADE' ? 'Whale Mirror' : '5K Milestone Snipe'}).\n\n` +
-                    `💳 *Current Wallet Balance:* \`${this.myBalance.toFixed(4)} SOL\`\n` +
-                    `👉 *Action Needed:* Deposit SOL to your bot address to execute live on-chain trades:\n\`${this.myWalletKey}\``
-                );
-            }
+            console.log(`[TRADE-ENGINE] ℹ️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast for ${mint}.`);
             return null;
         }
         
@@ -394,15 +384,6 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
                 } catch (sendErr) {
                     console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error:", sendErr.message);
-                    const telegramService = require('./telegram.service');
-                    if (sendErr.message.includes('Attempt to debit an account') || sendErr.message.includes('0x1') || sendErr.message.includes('insufficient')) {
-                        telegramService.sendAlert(
-                            `⚠️ *Trade Execution Notice — Insufficient SOL Balance*\n\n` +
-                            `Razor attempted to execute a *${action.toUpperCase()}* of \`${amount} SOL\` on \`${mint}\`.\n\n` +
-                            `💳 *Current Wallet Balance:* \`${this.myBalance.toFixed(4)} SOL\`\n` +
-                            `👉 *Action Needed:* Fund your bot wallet to execute on-chain trades: \`${this.myWalletKey}\``
-                        );
-                    }
                     return null;
                 }
                 
