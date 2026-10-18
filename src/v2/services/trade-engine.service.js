@@ -231,8 +231,8 @@ class TradeEngine {
         
         const currentMC_USD = currentMC * solanaService.getSolPriceUSD();
 
-        // Only save new tokens to permanent DB if they hit the watchlist threshold (default $10,000 MC)
-        if(currentMC_USD >= this.watchlistThresholdUSD && !token.isSavedToDB) {
+        // Only save new tokens to permanent DB if early CA discovery is enabled and they hit the watchlist threshold
+        if(this.earlyCADiscoveryEnabled && currentMC_USD >= this.watchlistThresholdUSD && !token.isSavedToDB) {
             console.log(`[TRADE-ENGINE] ⭐ Token ${mint} crossed $${Math.round(this.watchlistThresholdUSD / 1000)}k MC ($${currentMC_USD.toFixed(2)})! Saving to permanent DB watchlist.`);
             token.isSavedToDB = true;
             updated = true;
@@ -248,19 +248,21 @@ class TradeEngine {
                     isRugged: false
                 });
             } catch (e) {
-                // Ignore duplicate keys if multiple trades fire concurrently at 5k
+                // Ignore duplicate keys if multiple trades fire concurrently
             }
         }
         
-        // Check for new milestones
-        for(let ms of this.MILESTONES) {
-            if(currentMC_USD >= ms && !token.milestonesHit.includes(ms)) {
-                console.log(`[TRADE-ENGINE] 🚀 Token ${mint} hit milestone: $${ms} MC!`);
-                token.milestonesHit.push(ms);
-                updated = true;
-                
-                // Trigger milestone snipe logic
-                await this.evaluateMilestoneSnipe(token, currentMC_USD);
+        // Check for new milestones only if Early CA discovery is enabled
+        if(this.earlyCADiscoveryEnabled) {
+            for(let ms of this.MILESTONES) {
+                if(currentMC_USD >= ms && !token.milestonesHit.includes(ms)) {
+                    console.log(`[TRADE-ENGINE] 🚀 Token ${mint} hit milestone: $${ms} MC!`);
+                    token.milestonesHit.push(ms);
+                    updated = true;
+                    
+                    // Trigger milestone snipe logic
+                    await this.evaluateMilestoneSnipe(token, currentMC_USD);
+                }
             }
         }
         
@@ -274,6 +276,7 @@ class TradeEngine {
     }
     
     async evaluateMilestoneSnipe(token, currentMC_USD) {
+        if (!this.earlyCADiscoveryEnabled) return;
         if(token.milestonesHit.includes(10000) && token.milestonesHit.includes(20000)) {
             const existing = await ActiveTrade.findOne({ mint: token.mint });
             if(!existing && !token.hasSniped && !token.isSniping) {
