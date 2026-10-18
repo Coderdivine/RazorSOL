@@ -71,6 +71,7 @@ class SolanaService {
 
     // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry & RPC fallback
     async fetchParsedTransactionSafe(signature, maxRetries = 3) {
+        const endpoints = [this.rpcUrl, 'https://solana-rpc.publicnode.com'].filter(Boolean);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 const tx = await this.connection.getParsedTransaction(signature, {
@@ -81,9 +82,13 @@ class SolanaService {
                     return tx;
                 }
             } catch (err) {
-                // Fallback to direct JSON-RPC getTransaction with maxSupportedTransactionVersion: 1
+                // Ignore web3 connection error and try direct JSON-RPC fallbacks
+            }
+
+            // Fallback to direct JSON-RPC on each endpoint (including publicnode)
+            for (const ep of endpoints) {
                 try {
-                    const res = await fetch(this.rpcUrl, {
+                    const res = await fetch(ep, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -105,11 +110,7 @@ class SolanaService {
                         return data.result;
                     }
                 } catch (rpcErr) {
-                    // Ignore fallback error and retry
-                }
-
-                if (attempt === maxRetries) {
-                    throw err;
+                    // Try next endpoint
                 }
             }
 
@@ -146,7 +147,31 @@ class SolanaService {
             .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
         const wsolDiff = preWsol - postWsol; // Positive when wallet spent WSOL
 
-        const totalSolSpent = nativeSolDiff + wsolDiff;
+        // Check USDC balance change for this wallet
+        const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+        const preUsdc = preTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === usdcMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const postUsdc = postTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === usdcMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const usdcDiff = preUsdc - postUsdc; // Positive when wallet spent USDC
+
+        // Check USDT balance change for this wallet
+        const usdtMint = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+        const preUsdt = preTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === usdtMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const postUsdt = postTokenBalances
+            .filter(b => b.owner === walletAddress && b.mint === usdtMint)
+            .reduce((sum, b) => sum + this.extractUiTokenAmount(b), 0);
+        const usdtDiff = preUsdt - postUsdt; // Positive when wallet spent USDT
+
+        const solPrice = this.getSolPriceUSD();
+        const usdSpent = usdcDiff + usdtDiff;
+        const solFromUsd = solPrice > 0 ? (usdSpent / solPrice) : 0;
+        const totalSolSpent = nativeSolDiff + wsolDiff + solFromUsd;
+        const totalLiquidBalanceSol = preSol + preWsol + (solPrice > 0 ? (preUsdc + preUsdt) / solPrice : 0);
 
         // Collect all non-base token mints touched by this wallet
         const walletMints = new Set();
@@ -171,28 +196,30 @@ class SolanaService {
 
             const tokenDiff = postAmount - preAmount;
 
-            // BUY: Token balance increased and SOL was spent
-            if (tokenDiff > 0 && totalSolSpent > 0.001) {
+            // BUY: Token balance increased and value was spent (SOL, WSOL, USDC, or USDT)
+            if (tokenDiff > 0 && (totalSolSpent > 0.001 || usdSpent > 0.5)) {
                 return {
                     txType: 'buy',
                     mint,
-                    solAmount: totalSolSpent,
+                    solAmount: Math.max(0.001, totalSolSpent),
+                    usdAmount: usdSpent > 0.5 ? usdSpent : totalSolSpent * solPrice,
                     tokenAmount: tokenDiff,
                     traderPublicKey: walletAddress,
-                    traderBalanceSol: preSol,
+                    traderBalanceSol: Math.max(0.1, totalLiquidBalanceSol),
                     signature
                 };
             }
 
-            // SELL: Token balance decreased and SOL was received
-            if (tokenDiff < 0 && totalSolSpent < -0.001) {
+            // SELL: Token balance decreased and value was received
+            if (tokenDiff < 0 && (totalSolSpent < -0.001 || usdSpent < -0.5)) {
                 return {
                     txType: 'sell',
                     mint,
                     solAmount: Math.abs(totalSolSpent),
+                    usdAmount: Math.abs(usdSpent),
                     tokenAmount: Math.abs(tokenDiff),
                     traderPublicKey: walletAddress,
-                    traderBalanceSol: postSol,
+                    traderBalanceSol: Math.max(0.1, totalLiquidBalanceSol),
                     signature
                 };
             }
@@ -224,19 +251,27 @@ class SolanaService {
                     this.processedSignatures.delete(first);
                 }
 
-                console.log(`[SOLANA-RPC] ⚡ Transaction detected for ${walletAddress}! Sig: ${signature}`);
-                
                 try {
                     const tx = await this.fetchParsedTransactionSafe(signature);
                     if (!tx) return;
 
                     const tradeEvent = this.parseWalletTrade(tx, walletAddress, signature);
-                    if (!tradeEvent) return;
+                    if (!tradeEvent) {
+                        const accountKeys = tx.transaction?.message?.accountKeys || [];
+                        const isSigner = accountKeys.some(k => k.signer && this.extractPubkeyString(k) === walletAddress);
+                        if (!isSigner) {
+                            console.log(`[SOLANA-RPC] ℹ️ Ignored passive protocol log for ${walletAddress.substring(0, 4)}...${walletAddress.substring(walletAddress.length - 4)} (Fee distribution / reward / airdrop)`);
+                        }
+                        return;
+                    }
 
+                    console.log(`[SOLANA-RPC] ⚡ Active Whale Trade detected for ${walletAddress}! Sig: ${signature}`);
                     if (tradeEvent.txType === 'buy') {
-                        console.log(`[SOLANA-RPC] 🎯 Whale BUY parsed on-chain! Mint: ${tradeEvent.mint} | Spent: ${tradeEvent.solAmount.toFixed(4)} SOL`);
+                        const usdDesc = tradeEvent.usdAmount ? ` (~$${tradeEvent.usdAmount.toFixed(2)} USD)` : '';
+                        console.log(`[SOLANA-RPC] 🎯 Whale BUY parsed on-chain! Mint: ${tradeEvent.mint} | Spent: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}`);
                     } else if (tradeEvent.txType === 'sell') {
-                        console.log(`[SOLANA-RPC] 📉 Whale SELL parsed on-chain! Mint: ${tradeEvent.mint} | Received: ${tradeEvent.solAmount.toFixed(4)} SOL`);
+                        const usdDesc = tradeEvent.usdAmount ? ` (~$${tradeEvent.usdAmount.toFixed(2)} USD)` : '';
+                        console.log(`[SOLANA-RPC] 📉 Whale SELL parsed on-chain! Mint: ${tradeEvent.mint} | Received: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}`);
                     }
 
                     if (typeof onTradeCallback === 'function') {

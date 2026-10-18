@@ -210,9 +210,12 @@ class TradeEngine {
         const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Live on DEX';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
         const receivedSol = tradeEvent.solAmount || 0;
+        const receivedDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
+            ? `${receivedSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+            : `${receivedSol.toFixed(4)} SOL`;
 
         const telegramService = require('./telegram.service');
-        const alertMsg = `📉 *Whale Sell Detected!* 📉\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Received:* ${receivedSol.toFixed(4)} SOL\n📈 *Current MC:* ${mcTracker}\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        const alertMsg = `📉 *Whale Sell Detected!* 📉\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Received:* ${receivedDesc}\n📈 *Current MC:* ${mcTracker}\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
         telegramService.sendAlert(alertMsg);
     }
 
@@ -352,8 +355,12 @@ class TradeEngine {
         const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Unknown';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
 
+        const spentDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
+            ? `${spentSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+            : `${spentSol.toFixed(4)} SOL`;
+
         const telegramService = require('./telegram.service');
-        const alertMsg = `🚨 *Whale Buy Detected!* 🚨\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Spent:* ${spentSol.toFixed(4)} SOL\n📈 *Current MC:* ${mcTracker}\n\n🗡️ *Razor Bot Execution:*\n*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        const alertMsg = `🚨 *Whale Buy Detected!* 🚨\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Spent:* ${spentDesc}\n📈 *Current MC:* ${mcTracker}\n\n🗡️ *Razor Bot Execution:*\n*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
         telegramService.sendAlert(alertMsg);
 
         console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
