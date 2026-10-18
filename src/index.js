@@ -1,3 +1,4 @@
+require("dotenv").config();
 require("express-async-errors");
 const app = require("express")();
 require("./v2/middlewares/pre-route.middleware")(app);

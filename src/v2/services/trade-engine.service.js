@@ -453,10 +453,10 @@ class TradeEngine {
                 console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network...`);
                 let signature;
                 try {
-                    signature = await this.connection.sendTransaction(tx, { maxRetries: 3 });
+                    signature = await solanaService.sendTransactionSafe(tx, { maxRetries: 3 });
                     console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
                 } catch (sendErr) {
-                    console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error:", sendErr.message);
+                    console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error across all endpoints:", sendErr.message);
                     return null;
                 }
                 

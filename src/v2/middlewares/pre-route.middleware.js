@@ -11,8 +11,9 @@ module.exports = (app) => {
 
     // Set Env File
     dotenv.config({
-        path: path.resolve(__dirname, "..", "..", ".env")
+        path: path.resolve(__dirname, "..", "..", "..", ".env")
     });
+    dotenv.config();
 
     // enable CORS
     app.use(cors({ origin: '*' }));
