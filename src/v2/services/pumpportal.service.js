@@ -143,18 +143,9 @@ class PumpPortalService {
     }
 
     async handleMessage(msg) {
-        // Handle PumpPortal API Error Responses
+        // Handle PumpPortal API Error Responses silently without spamming Telegram
         if (msg.errors) {
-            console.error(`[PUMPPORTAL] 🚨 API Notice: ${msg.errors}`);
-            if (msg.errors.includes("Minimum balance") && !this.balanceAlertSent) {
-                this.balanceAlertSent = true;
-                const telegramService = require('./telegram.service');
-                telegramService.sendAlert(
-                    `⚠️ *PumpPortal Metered API Notice:*\n\n` +
-                    `PumpPortal requires at least *0.02 SOL* balance in your trading wallet (\`${process.env.WALLET_PUBLIC_KEY}\`) to stream metered account trade events.\n\n` +
-                    `🛡️ *Dual-Engine Fallback Active:* Razor has activated its direct Solana RPC on-chain monitor to watch your target wallets directly on the blockchain without interruption.`
-                );
-            }
+            console.log(`[PUMPPORTAL] ℹ️ API Notice: ${msg.errors} (Dual-Engine Solana RPC on-chain listener is active)`);
             return;
         }
 
