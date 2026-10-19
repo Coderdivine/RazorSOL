@@ -351,7 +351,6 @@ class TradeEngine {
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
 `📈 *Current MC:* ${mcTracker}\n\n` +
-`🗡️ *Razor Bot Execution:* Position Closed\n\n` +
 `📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
 
         telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
@@ -559,8 +558,7 @@ class TradeEngine {
 `🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
 `💰 *Whale Spent:* ${spentDesc}\n` +
-`📈 *Current MC:* ${mcTracker}\n` +
-`🗡️ *Razor Bot Execution:*\nBuy Amount: \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n` +
+`📈 *Current MC:* ${mcTracker}\n\n` +
 `📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
 
         telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
