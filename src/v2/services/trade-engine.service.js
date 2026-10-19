@@ -5,6 +5,7 @@ const solanaService = require('./solana.service');
 const WatchedWallet = require('../models/WatchedWallet');
 const TokenMetrics = require('../models/TokenMetrics');
 const ActiveTrade = require('../models/ActiveTrade');
+const WhalePosition = require('../models/WhalePosition');
 
 const { WALLET_PUBLIC_KEY, WALLET_PRIVATE_KEY, SOLANA_RPC_URL } = process.env;
 
@@ -193,6 +194,10 @@ class TradeEngine {
             if (!this.processedTradeSigs) this.processedTradeSigs = new Set();
             if (this.processedTradeSigs.has(tradeEvent.signature)) return;
             this.processedTradeSigs.add(tradeEvent.signature);
+            if (this.processedTradeSigs.size > 2000) {
+                const first = this.processedTradeSigs.values().next().value;
+                this.processedTradeSigs.delete(first);
+            }
         }
 
         let tokenData = this.tokenCache.get(tradeEvent.mint) || await TokenMetrics.findOne({ mint: tradeEvent.mint });
@@ -210,12 +215,133 @@ class TradeEngine {
         const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Live on DEX';
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
         const receivedSol = tradeEvent.solAmount || 0;
-        const receivedDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
-            ? `${receivedSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+        const solPrice = solanaService.getSolPriceUSD();
+        const receivedUsd = tradeEvent.usdAmount && tradeEvent.usdAmount > 1 ? tradeEvent.usdAmount : (receivedSol * solPrice);
+
+        const receivedDesc = receivedUsd > 1
+            ? `${receivedSol.toFixed(4)} SOL (~$${receivedUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
             : `${receivedSol.toFixed(4)} SOL`;
 
+        // 1. Fetch tracked whale entry position for Realized Profit/Loss (Gain) calculation
+        let pnlSection = '';
+        let whalePos = null;
+        try {
+            // First search for open position
+            whalePos = await WhalePosition.findOne({
+                walletAddress: watchedWallet.walletAddress,
+                mint: tradeEvent.mint,
+                isOpen: true
+            }).sort({ createdAt: -1 });
+
+            // If not found as open, check most recently updated position
+            if (!whalePos) {
+                whalePos = await WhalePosition.findOne({
+                    walletAddress: watchedWallet.walletAddress,
+                    mint: tradeEvent.mint
+                }).sort({ createdAt: -1 });
+            }
+        } catch (findErr) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error querying WhalePosition:", findErr.message);
+        }
+
+        if (whalePos && whalePos.totalSolInvested > 0) {
+            const enteredSol = whalePos.totalSolInvested;
+            const enteredUsd = whalePos.totalUsdInvested || (enteredSol * solPrice);
+
+            const netSolGain = receivedSol - enteredSol;
+            const netUsdGain = receivedUsd - enteredUsd;
+            const roiPercent = ((receivedSol - enteredSol) / enteredSol) * 100;
+            const roiMultiplier = enteredSol > 0 ? (receivedSol / enteredSol) : 1;
+
+            const isProfit = netSolGain >= 0;
+            const signEmoji = isProfit ? '🟢' : '🔴';
+            const gainSign = isProfit ? '+' : '';
+
+            // Holding duration calculation
+            const durationMs = Math.max(0, Date.now() - new Date(whalePos.firstBuyAt).getTime());
+            const hours = Math.floor(durationMs / 3600000);
+            const minutes = Math.floor((durationMs % 3600000) / 60000);
+            const holdingTimeDesc = hours > 0 ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
+
+            const enteredDesc = enteredUsd > 1
+                ? `${enteredSol.toFixed(4)} SOL (~$${enteredUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+                : `${enteredSol.toFixed(4)} SOL`;
+
+            const gainSolDesc = `${gainSign}${netSolGain.toFixed(4)} SOL`;
+            const gainUsdDesc = `${gainSign}$${Math.abs(netUsdGain).toLocaleString('en-US', { maximumFractionDigits: 2 })} USD`;
+            const roiDesc = `${gainSign}${roiPercent.toFixed(1)}% (${roiMultiplier.toFixed(2)}x)`;
+
+            pnlSection =
+`🎯 *Whale Entry:* \`${enteredDesc}\`\n` +
+`💰 *Whale Exit:* \`${receivedDesc}\`\n` +
+`📊 *Actual Net PnL:* ${signEmoji} *${gainSolDesc}* (~${gainUsdDesc}) | *${roiDesc}*\n` +
+`⏱️ *Holding Time:* \`${holdingTimeDesc}\``;
+
+            // Update database position stats
+            try {
+                whalePos.totalTokensSold += (tradeEvent.tokenAmount || 0);
+                whalePos.totalSolRealized += receivedSol;
+                whalePos.totalUsdRealized += receivedUsd;
+                whalePos.netRealizedSolGain = whalePos.totalSolRealized - whalePos.totalSolInvested;
+                whalePos.netRealizedUsdGain = whalePos.totalUsdRealized - whalePos.totalUsdInvested;
+                whalePos.roiPercent = whalePos.totalSolInvested > 0
+                    ? ((whalePos.totalSolRealized - whalePos.totalSolInvested) / whalePos.totalSolInvested) * 100
+                    : 0;
+                whalePos.lastSellAt = new Date();
+                whalePos.sellCount += 1;
+                whalePos.isOpen = false; // Closed out on sell
+                await whalePos.save();
+                console.log(`[TRADE-ENGINE] 🏁 Recorded Whale Exit for ${watchedWallet.walletAddress} on ${tradeEvent.mint}: PnL=${gainSolDesc} (${roiDesc})`);
+            } catch (saveErr) {
+                console.warn("[TRADE-ENGINE] ⚠️ Error updating WhalePosition on sell:", saveErr.message);
+            }
+        } else {
+            // Entry was prior to tracking start
+            pnlSection =
+`💰 *Whale Exit:* \`${receivedDesc}\`\n` +
+`🎯 *Whale Entry:* _Prior Entry (Purchased before tracker start)_`;
+        }
+
+        // 2. Whale Sell Mirroring: If Razor Bot holds an active copy position for this token, close it!
+        let razorActionDesc = 'ℹ️ No Active Position';
+        try {
+            const activeCopyTrade = await ActiveTrade.findOne({
+                mint: tradeEvent.mint,
+                status: { $in: ["OPEN", "REENTERED"] },
+                source: "COPY_TRADE"
+            });
+
+            if (activeCopyTrade) {
+                await this.updateMyBalance();
+                if (this.myBalance >= 0.005) {
+                    console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Executing sell...`);
+                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, 0.0001, "COPY_TRADE", watchedWallet.walletAddress, activeCopyTrade._id);
+                    if (sellSig) {
+                        activeCopyTrade.status = "CLOSED";
+                        await activeCopyTrade.save();
+                        razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ [Solscan](https://solscan.io/tx/${sellSig}))`;
+                    } else {
+                        razorActionDesc = `⚠️ *Sell Attempted* (Broadcast pending)`;
+                    }
+                } else {
+                    razorActionDesc = `⏸️ *Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`;
+                }
+            }
+        } catch (copyErr) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error mirroring whale exit:", copyErr.message);
+        }
+
         const telegramService = require('./telegram.service');
-        const alertMsg = `📉 *Whale Sell Detected!* 📉\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Received:* ${receivedDesc}\n📈 *Current MC:* ${mcTracker}\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        const alertMsg =
+`📉 *Whale Sell & Profit Realized!* 📉\n\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
+`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
+`${pnlSection}\n` +
+`📈 *Exit MC:* ${mcTracker}\n\n` +
+`🗡️ *Razor Bot:* ${razorActionDesc}\n\n` +
+`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+
         telegramService.sendAlert(alertMsg);
     }
 
@@ -359,8 +485,51 @@ class TradeEngine {
             ? `${spentSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
             : `${spentSol.toFixed(4)} SOL`;
 
+        // Track Whale Entry Position for PnL / Gain calculation upon exit
+        try {
+            let whalePos = await WhalePosition.findOne({
+                walletAddress: watchedWallet.walletAddress,
+                mint: tradeEvent.mint,
+                isOpen: true
+            });
+
+            const usdInvested = tradeEvent.usdAmount || (spentSol * solanaService.getSolPriceUSD());
+
+            if (whalePos) {
+                whalePos.totalSolInvested += spentSol;
+                whalePos.totalUsdInvested += usdInvested;
+                whalePos.totalTokensBought += (tradeEvent.tokenAmount || 0);
+                whalePos.buyCount += 1;
+                whalePos.lastBuyAt = new Date();
+                await whalePos.save();
+                console.log(`[TRADE-ENGINE] 📈 Updated Whale DCA Position for ${watchedWallet.walletAddress} on ${tradeEvent.mint} (Total: ${whalePos.totalSolInvested.toFixed(4)} SOL)`);
+            } else {
+                await WhalePosition.create({
+                    walletAddress: watchedWallet.walletAddress,
+                    mint: tradeEvent.mint,
+                    tokenName: tokenData ? tokenData.name : 'Unknown Token',
+                    tokenSymbol: tokenData ? tokenData.symbol : 'UNK',
+                    totalTokensBought: tradeEvent.tokenAmount || 0,
+                    totalSolInvested: spentSol,
+                    totalUsdInvested: usdInvested,
+                    entryMarketCapUSD: mcUSD,
+                    firstBuyAt: new Date(),
+                    lastBuyAt: new Date(),
+                    buyCount: 1,
+                    isOpen: true
+                });
+                console.log(`[TRADE-ENGINE] 📝 Recorded new Whale Entry Position for ${watchedWallet.walletAddress} on ${tradeEvent.mint} (${spentSol.toFixed(4)} SOL)`);
+            }
+        } catch (posErr) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error recording WhalePosition entry:", posErr.message);
+        }
+
+        const botExecDesc = this.myBalance < 0.005
+            ? `🗡️ *Razor Bot Execution:*\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)\n👉 _Deposit SOL to your bot address to execute live trades._`
+            : `🗡️ *Razor Bot Execution:*\n*Buy Amount:* \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)`;
+
         const telegramService = require('./telegram.service');
-        const alertMsg = `🚨 *Whale Buy Detected!* 🚨\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Spent:* ${spentDesc}\n📈 *Current MC:* ${mcTracker}\n\n🗡️ *Razor Bot Execution:*\n*Buy Amount:* ${myTradeSize.toFixed(4)} SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+        const alertMsg = `🚨 *Whale Buy Detected!* 🚨\n\n👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n🏷️ *CA:* \`${tradeEvent.mint}\`\n💰 *Whale Spent:* ${spentDesc}\n📈 *Current MC:* ${mcTracker}\n\n${botExecDesc}\n\n📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
         telegramService.sendAlert(alertMsg);
 
         console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);

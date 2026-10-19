@@ -1078,7 +1078,7 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
             try {
                 await this.bot.telegram.sendMessage(targetId, message, {
                     parse_mode: 'Markdown',
-                    disable_web_page_preview: false
+                    disable_web_page_preview: true
                 });
             } catch (err) {
                 // If markdown parse failed, try sending plain text
