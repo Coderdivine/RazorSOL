@@ -118,9 +118,9 @@ class TelegramService {
     getMenuButtons() {
         return Markup.inlineKeyboard([
             [Markup.button.callback('💼 Active Positions', 'action_positions'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
+            [Markup.button.callback('🎟️ VIP & Demo Hub', 'help_cat_vip'), Markup.button.callback('📜 Monitored Whales', 'action_list')],
             [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('⚙️ Early CA Discovery', 'action_earlyca_menu')],
-            [Markup.button.callback('💳 Bot Address', 'action_address'), Markup.button.callback('📜 Monitored Wallets', 'action_list')],
-            [Markup.button.callback('📖 Strategy Guide', 'action_help')]
+            [Markup.button.callback('💳 Bot Address', 'action_address'), Markup.button.callback('📖 Command Directory', 'action_help')]
         ]);
     }
 
@@ -143,16 +143,50 @@ class TelegramService {
 
     getHelpCategoryButtons() {
         return Markup.inlineKeyboard([
-            [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')],
-            [Markup.button.callback('🎯 Copy Trading Engine', 'help_cat_copy'), Markup.button.callback('🔫 Milestone Sniper', 'help_cat_sniper')],
-            [Markup.button.callback('🛡️ Risk & Anti-Rug Guard', 'help_cat_risk'), Markup.button.callback('💼 Wallet Management', 'help_cat_wallets')],
-            [Markup.button.callback('⚙️ Early CA Settings', 'action_earlyca_menu'), Markup.button.callback('📊 Analytics Terminal', 'help_cat_stats')]
+            [Markup.button.callback('🎟️ VIP & Demo Management', 'help_cat_vip')],
+            [Markup.button.callback('🎯 Whale Tracking', 'help_cat_whales')],
+            [Markup.button.callback('💼 Positions & Trading', 'help_cat_trading')],
+            [Markup.button.callback('⚙️ Settings & Discovery', 'help_cat_settings')]
+        ]);
+    }
+
+    getVipHelpButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('🎟️ /demo (Create Pass)', 'action_cmd_demo'), Markup.button.callback('⏳ /extend (Add Time)', 'action_cmd_extend')],
+            [Markup.button.callback('👥 /members (View Active)', 'action_members'), Markup.button.callback('💎 /pricing (Plans)', 'action_pricing')],
+            [Markup.button.callback('👑 /grant (Give VIP)', 'action_cmd_grant'), Markup.button.callback('🚫 /revoke (Kick User)', 'action_cmd_revoke')],
+            [Markup.button.callback('⚙️ /setchannel (Link Group)', 'action_cmd_setchannel')],
+            [Markup.button.callback('🔙 Back to Categories', 'action_help')]
+        ]);
+    }
+
+    getWhalesHelpButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('📜 /list (Monitored Wallets)', 'action_list'), Markup.button.callback('💳 /address (Bot Wallet)', 'action_address')],
+            [Markup.button.callback('🎯 /watch (Add Whale)', 'action_cmd_watch'), Markup.button.callback('🗑️ /remove (Untrack)', 'action_cmd_remove')],
+            [Markup.button.callback('🔙 Back to Categories', 'action_help')]
+        ]);
+    }
+
+    getTradingHelpButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('💼 /positions (Open Trades)', 'action_positions'), Markup.button.callback('📊 /stats (PnL Chart)', 'action_stats')],
+            [Markup.button.callback('🤖 /profile (Engine Status)', 'action_profile')],
+            [Markup.button.callback('🔙 Back to Categories', 'action_help')]
+        ]);
+    }
+
+    getSettingsHelpButtons() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('⚙️ /earlyca (View Discovery)', 'action_earlyca_menu'), Markup.button.callback('🎯 /threshold (Set MC Gate)', 'action_cmd_threshold')],
+            [Markup.button.callback('🟢 Enable Early CA', 'action_toggle_earlyca_on'), Markup.button.callback('🔴 Disable Early CA', 'action_toggle_earlyca_off')],
+            [Markup.button.callback('🔙 Back to Categories', 'action_help')]
         ]);
     }
 
     getHelpBackButtons() {
         return Markup.inlineKeyboard([
-            [Markup.button.callback('🔙 Return to Strategy Guide', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
+            [Markup.button.callback('🔙 Return to Categories', 'action_help'), Markup.button.callback('📊 View Terminal', 'action_stats')]
         ]);
     }
 
@@ -610,65 +644,272 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await this.removeWalletFromWatch(ctx, wallet);
         });
 
-        // Help Categories
-        this.bot.action('help_cat_copy', async (ctx) => {
+        // Categorized Help Menus
+        this.bot.action('help_cat_vip', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
-            const text = `🎯 *COPY TRADING ENGINE*\n` +
-                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `Razor monitors your target whale addresses using a *Dual-Engine* stream (PumpPortal WebSocket + Solana RPC On-Chain Logs).\n\n` +
-                         `• *Gain Factor Math:* When a target wallet buys, Razor compares their spent SOL to their total liquid SOL balance to determine their conviction scale.\n` +
-                         `• *Scale Allocation:* Razor mirrors that exact percentage against your own balance.\n` +
-                         `• *Circuit Breakers:* Max allocation is capped at 10% of portfolio per trade. Min trade size is 0.01 SOL.\n` +
-                         `• *Instant Alerts:* Every buy sends a rich notification to your private alert group.`;
-            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+            const text =
+`🎟️ *VIP CHANNEL & DEMO MANAGEMENT*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Manage your private signals channel, generate 24-hour trials for prospects, check active members, and review pricing.
+
+*Tap any command button below to run it or view setup:*`;
+            await this.safeEditOrReply(ctx, text, this.getVipHelpButtons());
         });
 
-        this.bot.action('help_cat_sniper', async (ctx) => {
+        this.bot.action('help_cat_whales', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`🎯 *WHALE TRACKING & MONITORS*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Monitor high-conviction Solana whale wallets. Whenever they buy or sell, Razor detects it instantly and posts alerts.
+
+*Tap any command button below to run it or view setup:*`;
+            await this.safeEditOrReply(ctx, text, this.getWhalesHelpButtons());
+        });
+
+        this.bot.action('help_cat_trading', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`💼 *POSITIONS & PERFORMANCE TERMINAL*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Track open meme coin positions, automatic profit-taking (2x rules), stop-loss exits, and view the live PnL chart.
+
+*Tap any command button below to execute:*`;
+            await this.safeEditOrReply(ctx, text, this.getTradingHelpButtons());
+        });
+
+        this.bot.action('help_cat_settings', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
             const tradeEngine = require('./trade-engine.service');
-            const threshK = Math.round(tradeEngine.watchlistThresholdUSD / 1000);
             const isEnabled = tradeEngine.earlyCADiscoveryEnabled;
-            const text = `🔫 *MILESTONE SNIPER STRATEGY*\n` +
-                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `• *${threshK}K Market Cap Gate:* Newly launched meme tokens start around ~$4.5k. Razor only saves tokens that successfully cross *$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD Market Cap* to avoid zero-volume rugs.\n` +
-                         `• *Early CA Control:* Currently ${isEnabled ? '🟢 ACTIVE' : '🔴 PAUSED'}. Easily toggle using \`/earlyca on\` or \`/earlyca off\`.\n` +
-                         `• *Milestone Progression:* If a token crosses 10k and 20k MC consecutively, momentum probability spikes. Razor snipes the coin targeting the 50k progression.\n` +
-                         `• *In-Memory Caching:* Token evaluation runs in RAM memory to execute sub-millisecond entry before bonding curve surges.`;
-            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+            const threshK = Math.round(tradeEngine.watchlistThresholdUSD / 1000);
+            const text =
+`⚙️ *SETTINGS & EARLY CA DISCOVERY*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Control automatic early token discovery (milestone sniper) and customize market cap thresholds to filter out zero-volume rugs.
+
+• *Early Discovery:* ${isEnabled ? '🟢 ACTIVE' : '🔴 PAUSED'}
+• *Watchlist Gate:* \`$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD\` (${threshK}K MC)
+
+*Tap any command button below:*`;
+            await this.safeEditOrReply(ctx, text, this.getSettingsHelpButtons());
         });
 
-        this.bot.action('help_cat_risk', async (ctx) => {
-            await ctx.answerCbQuery().catch(() => {});
-            const text = `🛡️ *RISK MANAGEMENT & ANTI-RUG GUARD*\n` +
-                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `• *Take Profit (2x):* The default rule is to sell 100% position upon achieving a 2x gain.\n` +
-                         `• *Smart Re-entry:* After locking 2x profit, Razor watches for a dip back to the initial entry Market Cap and re-enters with 50% capital.\n` +
-                         `• *Stop Loss (1.2x):* If a position depreciates by 20% (1.2x drop from entry), Razor exits immediately to preserve capital.\n` +
-                         `• *3-Month TTL Auto-Purge:* Dead coins are automatically deleted from MongoDB after 90 days.`;
-            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        // Command Button Actions (VIP)
+        this.bot.action('action_members', async (ctx) => {
+            await ctx.answerCbQuery('Loading members dashboard...').catch(() => {});
+            await this.handleMembers(ctx);
         });
 
-        this.bot.action('help_cat_wallets', async (ctx) => {
-            await ctx.answerCbQuery().catch(() => {});
-            const text = `💼 *WALLET MANAGEMENT COMMANDS*\n` +
-                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `• \`/address\` — View bot trading wallet address & live SOL balance.\n` +
-                         `• \`/profile\` — View bot trading profile, strategy parameters & status.\n` +
-                         `• \`/watch <address>\` — Begin tracking and copy-trading a whale.\n` +
-                         `• \`/remove <address>\` — Stop monitoring and delete from database.\n` +
-                         `• \`/list\` — View all currently active monitored addresses.\n\n` +
-                         `💡 _Tip: You can add or remove wallets on the fly without restarting the bot._`;
-            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+        this.bot.action('action_pricing', async (ctx) => {
+            await ctx.answerCbQuery('Loading pricing plans...').catch(() => {});
+            await this.handlePricing(ctx);
         });
 
-        this.bot.action('help_cat_stats', async (ctx) => {
+        this.bot.action('action_cmd_demo', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
-            const text = `📊 *PERFORMANCE TERMINAL*\n` +
-                         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                         `• \`/stats\` — Renders real-time PnL metrics and high-resolution chart.\n` +
-                         `• *Timeframes:* Toggle between 24 Hours, 7 Days, and 30 Days.\n` +
-                         `• *Offline Engine:* Charts are generated locally as native high-resolution images in 20ms without relying on external image servers.`;
-            ctx.editMessageText(text, { parse_mode: 'Markdown', ...this.getHelpBackButtons() }).catch(() => {});
+            const text =
+`🎟️ *COMMAND: /demo*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Generate a single-use private invite link for a prospective client.
+The link automatically burns once they join, and a 24-hour countdown begins. When their time is up, the bot automatically kicks them.
+
+*Usage:*
+\`/demo @username [hours]\`
+
+*Examples:*
+• \`/demo @crypto_sam\` (24-Hour Free Pass)
+• \`/demo @crypto_sam 48h\` (48-Hour Pass)
+• \`/demo @crypto_sam 3d\` (3-Day Pass)
+
+💡 _Tap any example above to copy it, replace the username, and send._`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        this.bot.action('action_cmd_extend', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`⏳ *COMMAND: /extend*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Add extra time to an existing demo member before or after their pass expires.
+
+*Usage:*
+\`/extend @username <duration>\`
+
+*Examples:*
+• \`/extend @crypto_sam 24h\` (+24 hours)
+• \`/extend @crypto_sam 48h\` (+48 hours)
+• \`/extend @crypto_sam 7d\` (+7 days)
+
+💡 _Tap any example above to copy it, replace the username, and send._`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        this.bot.action('action_cmd_grant', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`👑 *COMMAND: /grant*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Grant paid VIP subscription access to a member who sent payment.
+
+*Usage:*
+\`/grant @username <tier> <duration>\`
+
+*Examples:*
+• \`/grant @crypto_sam tier1 30d\` (Tier 1 Signals — 30 Days)
+• \`/grant @crypto_sam tier2 30d\` (Tier 2 Autopilot Bot — 30 Days)
+• \`/grant @crypto_sam lifetime\` (Lifetime Whale Syndicate)
+
+💡 _Tap any example above to copy it, replace the username, and send._`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('💎 View Pricing Plans', 'action_pricing')],
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        this.bot.action('action_cmd_revoke', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`🚫 *COMMAND: /revoke*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Immediately revoke a member's access and remove them from your private channel.
+
+*Usage:*
+\`/revoke @username\`
+
+*Example:*
+\`/revoke @crypto_sam\``;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('👥 View Members List', 'action_members')],
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        this.bot.action('action_cmd_setchannel', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const currentChannel = await this.getTargetChannelId();
+            const text =
+`⚙️ *COMMAND: /setchannel*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Connect your private Telegram VIP channel to Razor so the bot can generate single-use invite links and post signals.
+
+*Current Linked Channel:* \`${currentChannel || 'None'}\`
+
+*Usage:*
+\`/setchannel <channel_id>\`
+
+*Example:*
+\`/setchannel -1003985019043\`
+
+*3 Steps to Setup:*
+1. Create a private Telegram channel.
+2. Add this bot as an **Administrator** with Invite Users and Ban Users permissions.
+3. Forward any post from that channel to @JsonDumpBot or @userinfobot to get your \`-100...\` channel ID, then send \`/setchannel <id>\` here!`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        // Command Button Actions (Whales)
+        this.bot.action('action_cmd_watch', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`🎯 *COMMAND: /watch*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Start monitoring any Solana whale wallet in real time. Razor detects all buys and sells across pump.fun and Raydium.
+
+*Usage:*
+\`/watch <wallet_address>\`
+
+*Example:*
+\`/watch AH39BneW9UeWxQysUcwogQrYFdPvJuRVZ5w4ccq9SKfL\`
+
+💡 *Pro-Tip:* You can also just paste any Solana wallet address directly into this chat!`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('📜 Monitored Wallets', 'action_list')],
+                [Markup.button.callback('🔙 Back to Whales', 'help_cat_whales'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        this.bot.action('action_cmd_remove', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`🗑️ *COMMAND: /remove*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Stop monitoring a whale wallet and remove them from tracking.
+
+*Usage:*
+\`/remove <wallet_address>\`
+
+💡 _Tip: Tap 'View & Untrack Wallets' below to see active whales and untrack any of them with one tap!_`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('📜 View & Untrack Wallets', 'action_list')],
+                [Markup.button.callback('🔙 Back to Whales', 'help_cat_whales'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        // Command Button Actions (Settings)
+        this.bot.action('action_cmd_threshold', async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const tradeEngine = require('./trade-engine.service');
+            const text =
+`🎯 *COMMAND: /threshold*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Set the minimum Market Cap required before Razor saves a newly discovered token to memory.
+
+*Current Threshold:* \`$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD\`
+
+*Usage:*
+\`/threshold <amount_usd>\`
+
+*Examples:*
+• \`/threshold 5000\` (Set gate to $5,000 MC)
+• \`/threshold 10000\` (Set gate to $10,000 MC)`;
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('⚙️ Early CA Menu', 'action_earlyca_menu')],
+                [Markup.button.callback('🔙 Back to Settings', 'help_cat_settings'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+            await this.safeEditOrReply(ctx, text, markup);
+        });
+
+        // Legacy Aliases
+        this.bot.action(['help_cat_copy', 'help_cat_wallets'], async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const text =
+`🎯 *WHALE TRACKING & MONITORS*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Monitor high-conviction Solana whale wallets. Whenever they buy or sell, Razor detects it instantly and posts alerts.
+
+*Tap any command button below to run it or view setup:*`;
+            await this.safeEditOrReply(ctx, text, this.getWhalesHelpButtons());
+        });
+
+        this.bot.action(['help_cat_sniper', 'help_cat_risk'], async (ctx) => {
+            await ctx.answerCbQuery().catch(() => {});
+            const tradeEngine = require('./trade-engine.service');
+            const isEnabled = tradeEngine.earlyCADiscoveryEnabled;
+            const threshK = Math.round(tradeEngine.watchlistThresholdUSD / 1000);
+            const text =
+`⚙️ *SETTINGS & EARLY CA DISCOVERY*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Control automatic early token discovery (milestone sniper) and customize market cap thresholds to filter out zero-volume rugs.
+
+• *Early Discovery:* ${isEnabled ? '🟢 ACTIVE' : '🔴 PAUSED'}
+• *Watchlist Gate:* \`$${tradeEngine.watchlistThresholdUSD.toLocaleString()} USD\` (${threshK}K MC)
+
+*Tap any command button below:*`;
+            await this.safeEditOrReply(ctx, text, this.getSettingsHelpButtons());
         });
     }
 
@@ -1006,17 +1247,149 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
 
     sendHelpMessage(ctx) {
         const helpText = 
-`⚡ *RAZOR ARCHITECTURE & CONTROL GUIDE*
+`⚡ *RAZOR CONTROL & COMMAND DIRECTORY*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Welcome to the Razor autonomous trading engine. Select any module below for in-depth documentation on algorithms and controls:`;
+Welcome to the Razor Command Center. All features and tools are organized into categories below.
 
+*Tap a category below to see and run its commands:*`;
+
+        return this.safeEditOrReply(ctx, helpText, this.getHelpCategoryButtons());
+    }
+
+    async safeEditOrReply(ctx, text, markup = {}) {
         if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
-            ctx.editMessageText(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {
-                ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
-            });
-        } else {
-            ctx.reply(helpText, { parse_mode: 'Markdown', ...this.getHelpCategoryButtons() }).catch(() => {});
+            try {
+                await ctx.editMessageText(text, {
+                    parse_mode: 'Markdown',
+                    disable_web_page_preview: true,
+                    ...markup
+                });
+                return;
+            } catch (err) {
+                if (err.message && err.message.includes('message is not modified')) return;
+            }
         }
+        await ctx.reply(text, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+            ...markup
+        }).catch(() => {});
+    }
+
+    async handleMembers(ctx) {
+        try {
+            const activeMembers = await ChannelMember.find({ isActive: true }).sort({ expiresAt: 1 });
+            if (activeMembers.length === 0) {
+                const emptyMsg =
+`👥 *RAZOR VIP CHANNEL MEMBERSHIP DASHBOARD*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+*Active Members:* 0
+
+No active demo trials or paid subscribers found.
+
+💡 *To invite a prospect for a 24h demo trial:*
+Type \`/demo @username\` or tap the button below.`;
+
+                const markup = Markup.inlineKeyboard([
+                    [Markup.button.callback('🎟️ Create 24h Demo Pass', 'action_cmd_demo')],
+                    [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+                ]);
+                return this.safeEditOrReply(ctx, emptyMsg, markup);
+            }
+
+            let demoList = [];
+            let paidList = [];
+            let pendingList = [];
+            const now = Date.now();
+
+            for (const m of activeMembers) {
+                const handle = m.username ? `@${m.username}` : `ID: ${m.telegramUserId}`;
+                if (m.status === 'PENDING_JOIN') {
+                    pendingList.push(`• ${handle} (Invite created, waiting to join)`);
+                } else if (m.tier === 'DEMO') {
+                    const msLeft = m.expiresAt ? m.expiresAt.getTime() - now : 0;
+                    const hoursLeft = Math.floor(msLeft / 3600000);
+                    const minsLeft = Math.floor((msLeft % 3600000) / 60000);
+                    const timeLeftStr = hoursLeft > 0 ? `${hoursLeft}h ${minsLeft}m left` : `${Math.max(0, minsLeft)}m left`;
+                    demoList.push(`• ${handle} — ⏳ *${timeLeftStr}*`);
+                } else {
+                    const tierName = m.tier === 'TIER_1_SIGNALS' ? 'Tier 1 Signals' : m.tier === 'TIER_2_BOT' ? 'Tier 2 Bot' : 'Lifetime';
+                    const dateStr = m.expiresAt ? m.expiresAt.toLocaleDateString() : 'Never';
+                    paidList.push(`• ${handle} — 👑 *${tierName}* (Exp: ${dateStr})`);
+                }
+            }
+
+            let resp = `👥 *RAZOR VIP CHANNEL MEMBERSHIP DASHBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+            if (demoList.length > 0) {
+                resp += `🎟️ *Active 24h Demos (${demoList.length}):*\n${demoList.join('\n')}\n\n`;
+            }
+            if (paidList.length > 0) {
+                resp += `👑 *Active Paid Subscribers (${paidList.length}):*\n${paidList.join('\n')}\n\n`;
+            }
+            if (pendingList.length > 0) {
+                resp += `⏳ *Pending Invites (${pendingList.length}):*\n${pendingList.join('\n')}\n\n`;
+            }
+
+            resp += `💡 *Quick Admin Actions:*\n• Extend: \`/extend @user 24h\`\n• Grant Paid: \`/grant @user tier1 30d\`\n• Revoke: \`/revoke @user\``;
+
+            const markup = Markup.inlineKeyboard([
+                [Markup.button.callback('🎟️ /demo (New Pass)', 'action_cmd_demo'), Markup.button.callback('⏳ /extend (Add Time)', 'action_cmd_extend')],
+                [Markup.button.callback('👑 /grant (Give VIP)', 'action_cmd_grant'), Markup.button.callback('🚫 /revoke (Kick User)', 'action_cmd_revoke')],
+                [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+            ]);
+
+            await this.safeEditOrReply(ctx, resp, markup);
+        } catch (e) {
+            console.error("[TELEGRAM] ❌ Error in handleMembers:", e.message);
+            ctx.reply(`❌ Error loading members: ${e.message}`).catch(() => {});
+        }
+    }
+
+    async handlePricing(ctx) {
+        const pricingMsg =
+`💎 *RAZOR ALPHA VIP — SUBSCRIPTION PLANS* 💎
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ *TIER 1: VIP SIGNAL PASS*
+💰 *Price:* \`0.75 SOL / Month\` (~$110 - $130)
+👉 *What You Get:*
+• 24/7 access to the private VIP Signal Channel.
+• Instant BUY alerts the second top insiders buy.
+• Instant SELL alerts when it's time to take profit.
+• Real dollar profit and ROI proof on every call.
+• Best for: Manual traders on their phone.
+
+2️⃣ *TIER 2: AUTOPILOT BOT* ⭐ *Most Popular*
+💰 *Price:* \`2.50 SOL / Month\` (~$350 - $400)
+👉 *What You Get:*
+• Everything in Tier 1 (VIP Signals).
+• Dedicated automated bot running on your personal wallet.
+• Auto-buys when top insiders buy.
+• Auto-sells when insiders exit or at 2x TP / -20% SL.
+• Built-in 10% max portfolio risk cap.
+• Best for: Hands-free profits while sleeping or working.
+
+3️⃣ *TIER 3: LIFETIME WHALE SYNDICATE*
+💰 *Price:* \`10.00 SOL One-Time\` (~$1,500)
+👉 *What You Get:*
+• Lifetime access to VIP Signals and Autopilot Bot forever.
+• Never pay monthly subscription fees again.
+• Track up to 3 custom whale wallets of your choice.
+• Fast-lane priority execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💳 *HOW TO ACTIVATE:*
+Send the subscription amount to our official bot address:
+\`${WALLET_PUBLIC_KEY || 'Contact Admin'}\`
+
+After sending, contact the admin with your transaction hash to activate instantly!`;
+
+        const markup = Markup.inlineKeyboard([
+            [Markup.button.callback('💳 View Bot Wallet', 'action_address'), Markup.button.callback('👥 View Members', 'action_members')],
+            [Markup.button.callback('🔙 Back to VIP Menu', 'help_cat_vip'), Markup.button.callback('🔙 All Categories', 'action_help')]
+        ]);
+
+        await this.safeEditOrReply(ctx, pricingMsg, markup);
     }
 
     async handleListWallets(ctx) {
@@ -1367,51 +1740,8 @@ ${invite.invite_link}
 
         // Command: /members
         this.bot.command('members', async (ctx) => {
-            try {
-                const activeMembers = await ChannelMember.find({ isActive: true }).sort({ expiresAt: 1 });
-                if (activeMembers.length === 0) {
-                    return ctx.reply(`📋 *No active demo or paid members found.*`);
-                }
-
-                let demoList = [];
-                let paidList = [];
-                let pendingList = [];
-                const now = Date.now();
-
-                for (const m of activeMembers) {
-                    const handle = m.username ? `@${m.username}` : `ID: ${m.telegramUserId}`;
-                    if (m.status === 'PENDING_JOIN') {
-                        pendingList.push(`• ${handle} (Invite created, waiting to join)`);
-                    } else if (m.tier === 'DEMO') {
-                        const msLeft = m.expiresAt ? m.expiresAt.getTime() - now : 0;
-                        const hoursLeft = Math.floor(msLeft / 3600000);
-                        const minsLeft = Math.floor((msLeft % 3600000) / 60000);
-                        const timeLeftStr = hoursLeft > 0 ? `${hoursLeft}h ${minsLeft}m left` : `${Math.max(0, minsLeft)}m left`;
-                        demoList.push(`• ${handle} — ⏳ *${timeLeftStr}*`);
-                    } else {
-                        const tierName = m.tier === 'TIER_1_SIGNALS' ? 'Tier 1 Signals' : m.tier === 'TIER_2_BOT' ? 'Tier 2 Bot' : 'Lifetime';
-                        const dateStr = m.expiresAt ? m.expiresAt.toLocaleDateString() : 'Never';
-                        paidList.push(`• ${handle} — 👑 *${tierName}* (Exp: ${dateStr})`);
-                    }
-                }
-
-                let resp = `👥 *RAZOR VIP CHANNEL MEMBERSHIP DASHBOARD*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-                if (demoList.length > 0) {
-                    resp += `🎟️ *Active 24h Demos (${demoList.length}):*\n${demoList.join('\n')}\n\n`;
-                }
-                if (paidList.length > 0) {
-                    resp += `👑 *Active Paid Subscribers (${paidList.length}):*\n${paidList.join('\n')}\n\n`;
-                }
-                if (pendingList.length > 0) {
-                    resp += `⏳ *Pending Invites (${pendingList.length}):*\n${pendingList.join('\n')}\n\n`;
-                }
-
-                resp += `💡 *Admin Commands:*\n• Extend: \`/extend @user 24h\`\n• Grant Paid: \`/grant @user tier1 30d\`\n• Revoke: \`/revoke @user\``;
-
-                await ctx.reply(resp, { parse_mode: 'Markdown' });
-            } catch (e) {
-                ctx.reply(`❌ Error loading members: ${e.message}`);
-            }
+            console.log(`[TELEGRAM] 📥 Received /members command from user: ${ctx.chat.id}`);
+            await this.handleMembers(ctx);
         });
 
         // Command: /setchannel <channel_id>
@@ -1464,40 +1794,8 @@ ${invite.invite_link}
 
         // Command: /pricing
         this.bot.command('pricing', async (ctx) => {
-            const pricingMsg =
-`💎 *RAZOR ALPHA VIP — SUBSCRIPTION PLANS* 💎\n` +
-`━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-`1️⃣ *TIER 1: VIP SIGNAL PASS*\n` +
-`💰 *Price:* \`0.75 SOL / Month\` (~$110 - $130)\n` +
-`👉 *What You Get:*\n` +
-`• 24/7 access to the private VIP Signal Channel.\n` +
-`• Instant BUY alerts the second top insiders buy.\n` +
-`• Instant SELL alerts when it's time to take profit.\n` +
-`• Real dollar profit and ROI proof on every call.\n` +
-`• Best for: Manual traders on their phone.\n\n` +
-`2️⃣ *TIER 2: AUTOPILOT BOT* ⭐ *Most Popular*\n` +
-`💰 *Price:* \`2.50 SOL / Month\` (~$350 - $400)\n` +
-`👉 *What You Get:*\n` +
-`• Everything in Tier 1 (VIP Signals).\n` +
-`• Dedicated automated bot running on your personal wallet.\n` +
-`• Auto-buys when top insiders buy.\n` +
-`• Auto-sells when insiders exit or at 2x TP / -20% SL.\n` +
-`• Built-in 10% max portfolio risk cap.\n` +
-`• Best for: Hands-free profits while sleeping or working.\n\n` +
-`3️⃣ *TIER 3: LIFETIME WHALE SYNDICATE*\n` +
-`💰 *Price:* \`10.00 SOL One-Time\` (~$1,500)\n` +
-`👉 *What You Get:*\n` +
-`• Lifetime access to VIP Signals and Autopilot Bot forever.\n` +
-`• Never pay monthly subscription fees again.\n` +
-`• Track up to 3 custom whale wallets of your choice.\n` +
-`• Fast-lane priority execution.\n\n` +
-`━━━━━━━━━━━━━━━━━━━━━━\n` +
-`💳 *HOW TO ACTIVATE:*\n` +
-`Send the subscription amount to our official bot address:\n` +
-`\`${WALLET_PUBLIC_KEY || 'Contact Admin'}\`\n\n` +
-`After sending, contact the admin with your transaction hash to activate instantly!`;
-
-            await ctx.reply(pricingMsg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            console.log(`[TELEGRAM] 📥 Received /pricing command from user: ${ctx.chat.id}`);
+            await this.handlePricing(ctx);
         });
 
         // Listener: chat_member (Triggers when user joins via single-use invite link)
