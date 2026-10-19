@@ -20,6 +20,10 @@ const BotSettingsSchema = new Schema(
       type: String,
       default: null,
     },
+    adminChatId: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

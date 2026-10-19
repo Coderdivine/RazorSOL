@@ -25,6 +25,7 @@ class TelegramService {
     constructor() {
         this.bot = null;
         this.startedAt = new Date();
+        this.adminChatId = null;
     }
 
     async init() {
@@ -39,6 +40,22 @@ class TelegramService {
         // Centralized error handler to prevent transient network errors from crashing the process
         this.bot.catch((err, ctx) => {
             console.warn(`[TELEGRAM] ⚠️ Handled Telegraf network/API error for ${ctx?.updateType || 'operation'}:`, err.message);
+        });
+
+        // Auto-capture admin chat ID from any direct interaction in private chat
+        this.bot.use(async (ctx, next) => {
+            if (ctx.chat?.type === 'private' && ctx.chat?.id) {
+                const chatId = String(ctx.chat.id);
+                if (this.adminChatId !== chatId) {
+                    this.adminChatId = chatId;
+                    BotSettings.findOneAndUpdate(
+                        { key: 'global' },
+                        { adminChatId: chatId },
+                        { upsert: true }
+                    ).catch(() => {});
+                }
+            }
+            return next();
         });
 
         this.registerCommands();
@@ -1930,54 +1947,132 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         }
     }
 
-    async sendAlert(message) {
+    async sendAlert(adminMessage, groupMessage = null) {
         if (!this.bot) return;
 
-        // Gather all target recipients
-        const targets = new Set();
-        if (this.configuredAlertChannel) targets.add(this.configuredAlertChannel);
-        if (process.env.TELEGRAM_ALERTS_CHANNEL) targets.add(process.env.TELEGRAM_ALERTS_CHANNEL);
+        const adminMsg = adminMessage;
+        const groupMsg = groupMessage || adminMessage;
 
-        // Also add dynamically linked VIP channel from BotSettings
+        // 1. Identify VIP channel (Group destination for prospects/subscribers)
+        let vipChannelId = null;
         try {
             const settings = await BotSettings.findOne({ key: 'global' });
             if (settings && settings.vipChannelId) {
-                targets.add(settings.vipChannelId);
+                vipChannelId = String(settings.vipChannelId);
             }
         } catch {}
 
-        // Also broadcast to users who registered watched wallets in DB
+        // 2. Identify Admin Chat ID
+        let adminChatId = this.adminChatId || null;
+        try {
+            const settings = await BotSettings.findOne({ key: 'global' });
+            if (settings && settings.adminChatId) {
+                adminChatId = String(settings.adminChatId);
+            }
+        } catch {}
+
+        const adminTargets = new Set();
+        const groupTargets = new Set();
+
+        // The VIP group / channel gets groupMsg (where private whale wallet links are masked)
+        if (vipChannelId) {
+            groupTargets.add(vipChannelId);
+        }
+
+        // Admin private chat gets adminMsg (full details, whale Solscan links, PnL)
+        if (adminChatId && (!vipChannelId || adminChatId !== vipChannelId)) {
+            adminTargets.add(adminChatId);
+        }
+
+        // Wallets addedBy (admin who typed /watch in private chat or bot)
         try {
             const wallets = await WatchedWallet.find({ isActive: true });
             wallets.forEach(w => {
                 if (w.addedBy && w.addedBy !== 'unknown' && w.addedBy !== 'inline') {
-                    targets.add(w.addedBy);
+                    const id = String(w.addedBy);
+                    if (!vipChannelId || id !== vipChannelId) {
+                        adminTargets.add(id);
+                    }
                 }
             });
         } catch {}
 
-        if (targets.size === 0) {
+        // ChannelMember addedByAdmin
+        try {
+            const members = await ChannelMember.find({ isActive: true });
+            members.forEach(m => {
+                if (m.addedByAdmin && m.addedByAdmin !== 'admin' && m.addedByAdmin !== 'unknown') {
+                    const id = String(m.addedByAdmin);
+                    if (!vipChannelId || id !== vipChannelId) {
+                        adminTargets.add(id);
+                    }
+                }
+            });
+        } catch {}
+
+        // Configured channels: TELEGRAM_ALERTS_CHANNEL from .env or configuredAlertChannel
+        const envAlertChannel = process.env.TELEGRAM_ALERTS_CHANNEL;
+        const cfgAlertChannel = this.configuredAlertChannel;
+
+        if (envAlertChannel) {
+            const id = String(envAlertChannel);
+            if (vipChannelId && id === vipChannelId) {
+                groupTargets.add(id);
+            } else {
+                adminTargets.add(id);
+            }
+        }
+
+        if (cfgAlertChannel) {
+            const id = String(cfgAlertChannel);
+            if (vipChannelId && id === vipChannelId) {
+                groupTargets.add(id);
+            } else {
+                adminTargets.add(id);
+            }
+        }
+
+        if (adminTargets.size === 0 && groupTargets.size === 0) {
             console.log("[TELEGRAM] ⚠️ No active alert channels or subscribers configured.");
             return;
         }
 
-        console.log(`[TELEGRAM] 📤 Dispatching alert to ${targets.size} recipient(s): [${[...targets].join(', ')}]`);
+        console.log(`[TELEGRAM] 📤 Dispatching alert ➔ Admin Targets (${adminTargets.size}): [${[...adminTargets].join(', ')}], Group Targets (${groupTargets.size}): [${[...groupTargets].join(', ')}]`);
 
-        for (const targetId of targets) {
+        // Send full details to Admin
+        for (const targetId of adminTargets) {
             try {
-                await this.bot.telegram.sendMessage(targetId, message, {
+                await this.bot.telegram.sendMessage(targetId, adminMsg, {
                     parse_mode: 'Markdown',
                     disable_web_page_preview: true
                 });
             } catch (err) {
-                // If markdown parse failed, try sending plain text
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
-                        const plainText = message.replace(/[*_`\[\]()]/g, '');
+                        const plainText = adminMsg.replace(/[*_`\[\]()]/g, '');
                         await this.bot.telegram.sendMessage(targetId, plainText);
                     } catch {}
                 } else {
-                    console.warn(`[TELEGRAM] ⚠️ Alert dispatch notice for ${targetId}:`, err.message);
+                    console.warn(`[TELEGRAM] ⚠️ Admin alert dispatch notice for ${targetId}:`, err.message);
+                }
+            }
+        }
+
+        // Send to Group
+        for (const targetId of groupTargets) {
+            try {
+                await this.bot.telegram.sendMessage(targetId, groupMsg, {
+                    parse_mode: 'Markdown',
+                    disable_web_page_preview: true
+                });
+            } catch (err) {
+                if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
+                    try {
+                        const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
+                        await this.bot.telegram.sendMessage(targetId, plainText);
+                    } catch {}
+                } else {
+                    console.warn(`[TELEGRAM] ⚠️ Group alert dispatch notice for ${targetId}:`, err.message);
                 }
             }
         }

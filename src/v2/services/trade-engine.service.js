@@ -272,12 +272,10 @@ class TradeEngine {
             const roiDesc = `${gainSign}${roiPercent.toFixed(1)}% (${roiMultiplier.toFixed(2)}x)`;
 
             pnlSection =
-`💰 *REAL RESULTS ON THIS TRADE:*\n` +
-`• *Started with:* \`${enteredDesc}\`\n` +
-`• *Cashed out with:* \`${receivedDesc}\`\n` +
-`• *Real Net Profit:* ${signEmoji} *${gainSolDesc}* (~${gainUsdDesc})\n` +
-`• *Total Return:* *${roiDesc}*\n` +
-`• *Time in Trade:* \`${holdingTimeDesc}\``;
+`🎯 *Whale Entry:* \`${enteredDesc}\`\n` +
+`💰 *Whale Exit:* \`${receivedDesc}\`\n` +
+`📊 *Actual Net PnL:* ${signEmoji} *${gainSolDesc}* (~${gainUsdDesc}) | *${roiDesc}*\n` +
+`⏱️ *Holding Time:* \`${holdingTimeDesc}\``;
 
             // Update database position stats
             try {
@@ -293,16 +291,15 @@ class TradeEngine {
                 whalePos.sellCount += 1;
                 whalePos.isOpen = false; // Closed out on sell
                 await whalePos.save();
-                console.log(`[TRADE-ENGINE] 🏁 Recorded Whale Exit on ${tradeEvent.mint}: PnL=${gainSolDesc} (${roiDesc})`);
+                console.log(`[TRADE-ENGINE] 🏁 Recorded Whale Exit for ${watchedWallet.walletAddress} on ${tradeEvent.mint}: PnL=${gainSolDesc} (${roiDesc})`);
             } catch (saveErr) {
                 console.warn("[TRADE-ENGINE] ⚠️ Error updating WhalePosition on sell:", saveErr.message);
             }
         } else {
             // Entry was prior to tracking start
             pnlSection =
-`💰 *REAL RESULTS ON THIS TRADE:*\n` +
-`• *Cashed out with:* \`${receivedDesc}\`\n` +
-`• *Started with:* _Prior Entry (Purchased before tracker start)_`;
+`💰 *Whale Received:* \`${receivedDesc}\`\n` +
+`🎯 *Whale Entry:* _Prior Entry (Purchased before tracker start)_`;
         }
 
         // 2. Whale Sell Mirroring: If Razor Bot holds an active copy position for this token, close it!
@@ -335,18 +332,29 @@ class TradeEngine {
         }
 
         const telegramService = require('./telegram.service');
-        const alertMsg =
-`🔴 *SELL NOW & TAKE PROFIT!* 🔴\n\n` +
+
+        // Admin Message (with FULL original details, whale Solscan link & address)
+        const adminAlertMsg =
+`📉 *Whale Sell Detected!* 📉\n\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
 `🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
-`🏷️ *Contract Address:*\n\`${tradeEvent.mint}\`\n\n` +
-`👉 *WHAT TO DO RIGHT NOW:*\n` +
-`Sell your tokens now! Our tracked top insider just exited the trade.\n\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
-`📈 *Exit Market Cap:* ${mcTracker}\n` +
-`🗡️ *Razor Autopilot:* ${razorActionDesc}\n\n` +
+`📈 *Current MC:* ${mcTracker}\n\n` +
+`🗡️ *Razor Bot:* ${razorActionDesc}\n\n` +
 `📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
 
-        telegramService.sendAlert(alertMsg);
+        // Group Message (whale address kept private, clean signals for members)
+        const groupAlertMsg =
+`📉 *Whale Sell Detected!* 📉\n\n` +
+`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
+`${pnlSection}\n\n` +
+`📈 *Current MC:* ${mcTracker}\n\n` +
+`🗡️ *Razor Bot Execution:* Position Closed\n\n` +
+`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+
+        telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -529,23 +537,33 @@ class TradeEngine {
         }
 
         const botExecDesc = this.myBalance < 0.005
-            ? `🗡️ *Razor Bot Execution:*\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)\n👉 _Deposit SOL to your bot address to execute live trades._`
-            : `🗡️ *Razor Bot Execution:*\n*Buy Amount:* \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)`;
+            ? `🗡️ *Razor Bot Execution:*\nBuy Amount: 0.0100 SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`
+            : `🗡️ *Razor Bot Execution:*\nBuy Amount: \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)`;
 
         const telegramService = require('./telegram.service');
-        const alertMsg =
-`🟢 *NEW BUY SIGNAL!* 🟢\n\n` +
+
+        // Admin Message (with FULL original details, whale Solscan link & address)
+        const adminAlertMsg =
+`🚨 *Whale Buy Detected!* 🚨\n\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
 `🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
-`🏷️ *Contract Address:*\n\`${tradeEvent.mint}\`\n\n` +
-`👉 *WHAT TO DO RIGHT NOW:*\n` +
-`1. Tap the contract address above to copy it.\n` +
-`2. Paste into your trading app or Pump.fun to BUY.\n` +
-`3. Relax! We will send a SELL alert when it's time to take profit.\n\n` +
-`💡 *Top Insider Bought:* \`${spentDesc}\`\n` +
-`📈 *Entry Market Cap:* ${mcTracker}\n\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
+`💰 *Whale Spent:* ${spentDesc}\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
 `${botExecDesc}\n\n` +
 `📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
-        telegramService.sendAlert(alertMsg);
+
+        // Group Message (whale address kept private, clean signals for members)
+        const groupAlertMsg =
+`🚨 *Whale Buy Detected!* 🚨\n\n` +
+`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
+`💰 *Whale Spent:* ${spentDesc}\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
+`🗡️ *Razor Bot Execution:*\nBuy Amount: \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)\n\n` +
+`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+
+        telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
 
         console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
