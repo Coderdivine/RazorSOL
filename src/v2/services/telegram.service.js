@@ -3,6 +3,8 @@ const { PublicKey } = require('@solana/web3.js');
 const WatchedWallet = require('../models/WatchedWallet');
 const ActiveTrade = require('../models/ActiveTrade');
 const TokenMetrics = require('../models/TokenMetrics');
+const ChannelMember = require('../models/ChannelMember');
+const BotSettings = require('../models/BotSettings');
 const solanaService = require('./solana.service');
 const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY, TELEGRAM_ALERTS_CHANNEL } = process.env;
 
@@ -40,22 +42,30 @@ class TelegramService {
         });
 
         this.registerCommands();
+        this.registerChannelManager();
         this.registerHears();
         this.registerInlineQuery();
         this.registerActions();
         this.registerTextHandler();
+        this.startExpirationWorker();
 
         // Register Telegram Command Auto-Suggestions across all scopes (shown as user types '/')
         try {
             const commands = [
                 { command: 'start', description: '⚡ Open Main Trading Terminal & Controls' },
+                { command: 'demo', description: '🎟️ Generate 24h VIP Demo Pass: /demo @username' },
+                { command: 'extend', description: '⏳ Extend Member Trial: /extend @username 24h' },
+                { command: 'grant', description: '👑 Grant Paid VIP Access: /grant @username tier1 30d' },
+                { command: 'revoke', description: '🚫 Revoke Member Access: /revoke @username' },
+                { command: 'members', description: '👥 View Active Demo & VIP Members' },
+                { command: 'setchannel', description: '⚙️ Bind VIP Channel: /setchannel <channel_id>' },
+                { command: 'pricing', description: '💎 View VIP Plans & Pricing' },
                 { command: 'positions', description: '💼 View Open Positions & Trade History' },
                 { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
                 { command: 'profile', description: '🤖 Bot Profile, Strategy & Live Status' },
                 { command: 'earlyca', description: '⚙️ Toggle Early CA Discovery: /earlyca [on|off]' },
                 { command: 'threshold', description: '🎯 Set Watchlist Threshold: /threshold <amount>' },
                 { command: 'address', description: '💳 Bot Trading Wallet Address & Balance' },
-                { command: 'wallet', description: '💳 View Bot Trading Wallet (Alias)' },
                 { command: 'list', description: '👁️ Active Monitored Whale Wallets' },
                 { command: 'watch', description: '🎯 Mirror a Whale: /watch <address>' },
                 { command: 'remove', description: '🗑️ Untrack a Whale: /remove <address>' },
@@ -71,17 +81,15 @@ class TelegramService {
             console.warn("[TELEGRAM] ⚠️ Failed to register commands with Telegram:", e.message);
         }
 
-        this.bot.catch((err, ctx) => {
-            console.warn(`[TELEGRAM] ⚠️ Error handling update:`, err.message);
-        });
-
         // Resilient bot launcher with automatic reconnection on 409 conflict or network dropout
         const launchBot = async (retryCount = 0) => {
             try {
                 // Clear any lingering webhook or stale polling lock
                 await this.bot.telegram.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
-                await this.bot.launch();
-                console.log("[TELEGRAM] 🚀 Telegraf polling engine active and listening.");
+                await this.bot.launch({
+                    allowedUpdates: ['message', 'callback_query', 'inline_query', 'chat_member', 'my_chat_member']
+                });
+                console.log("[TELEGRAM] 🚀 Telegraf polling engine active and listening with chat_member updates enabled.");
             } catch (err) {
                 console.error(`[TELEGRAM] ❌ Bot launch error (attempt ${retryCount + 1}):`, err.message);
                 try { this.bot.stop(); } catch {}
@@ -1049,6 +1057,581 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
         }).catch(() => {});
     }
 
+    async getTargetChannelId() {
+        try {
+            const settings = await BotSettings.findOne({ key: 'global' });
+            if (settings && settings.vipChannelId) {
+                return settings.vipChannelId;
+            }
+        } catch {}
+        return this.configuredAlertChannel || process.env.TELEGRAM_ALERTS_CHANNEL || null;
+    }
+
+    registerChannelManager() {
+        if (!this.bot) return;
+
+        // Command: /demo @username [duration]
+        this.bot.command('demo', async (ctx) => {
+            const text = ctx.message?.text || '';
+            const parts = text.split(/\s+/).filter(Boolean);
+
+            if (parts.length < 2) {
+                return ctx.reply(
+                    `🎟️ *HOW TO GENERATE A 24H VIP DEMO PASS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `Create a private single-use invite link for a prospect.\n\n` +
+                    `*Usage:*\n\`/demo @username [hours]\`\n\n` +
+                    `*Examples:*\n` +
+                    `• \`/demo @john\` (Defaults to 24 hours)\n` +
+                    `• \`/demo @sarah 48h\` (Custom 48 hours)\n` +
+                    `• \`/demo @mike 3d\` (Custom 3 days)\n\n` +
+                    `💡 *Rules:* Link burns automatically once they join. 24h countdown starts upon entry. Bot kicks them automatically when expired.`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            const cleanUser = parts[1].replace('@', '').trim().toLowerCase();
+            let durationHours = 24;
+            if (parts[2]) {
+                const dur = parts[2].toLowerCase();
+                if (dur.endsWith('d')) durationHours = parseInt(dur) * 24;
+                else if (dur.endsWith('h')) durationHours = parseInt(dur);
+                else if (!isNaN(dur)) durationHours = parseInt(dur);
+            }
+            if (isNaN(durationHours) || durationHours <= 0) durationHours = 24;
+
+            const channelId = await this.getTargetChannelId();
+            if (!channelId) {
+                return ctx.reply(
+                    `⚠️ *No VIP Channel Linked Yet!*\n\n` +
+                    `To generate demo links, link your private VIP channel first:\n` +
+                    `1. Add this bot as an **Administrator** in your private Telegram channel.\n` +
+                    `2. Type \`/setchannel <channel_id>\` (e.g. \`/setchannel -1001234567890\`).\n` +
+                    `Or set \`TELEGRAM_ALERTS_CHANNEL\` in your \`.env\` file.`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            const expireTimestamp = Math.floor(Date.now() / 1000) + (durationHours * 3600);
+            let invite;
+            try {
+                invite = await this.bot.telegram.createChatInviteLink(channelId, {
+                    name: `Demo @${cleanUser}`,
+                    member_limit: 1,
+                    expire_date: expireTimestamp
+                });
+            } catch (err) {
+                console.error("[TELEGRAM] ❌ Failed to create invite link:", err.message);
+                return ctx.reply(
+                    `❌ *Could not generate invite link:* ${err.message}\n\n` +
+                    `💡 *Check:* Is the bot added to channel \`${channelId}\` as an **Administrator** with **Invite Users via Link** permissions enabled?`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            try {
+                await ChannelMember.create({
+                    username: cleanUser,
+                    channelId: String(channelId),
+                    tier: 'DEMO',
+                    inviteLink: invite.invite_link,
+                    durationHours,
+                    status: 'PENDING_JOIN',
+                    expiresAt: new Date(Date.now() + (durationHours * 3600000)),
+                    isActive: true,
+                    addedByAdmin: String(ctx.from?.id || 'admin')
+                });
+
+                const replyMsg =
+`✅ *VIP DEMO PASS READY FOR @${cleanUser}!*
+━━━━━━━━━━━━━━━━━━━━━━
+⏳ *Duration:* ${durationHours} Hours (Starts when they join)
+
+🔗 *Single-Use Invite Link:*
+${invite.invite_link}
+
+📋 *Active Protections:*
+• *Single-Use:* Link burns automatically once @${cleanUser} enters.
+• *Auto-Kick:* Bot automatically kicks them when ${durationHours}h expires.
+• *Extend Anytime:* Type \`/extend @${cleanUser} 24h\` if they need more time.`;
+
+                await ctx.reply(replyMsg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            } catch (dbErr) {
+                console.error("[TELEGRAM] ❌ Error saving ChannelMember:", dbErr.message);
+                ctx.reply(`⚠️ Link created: ${invite.invite_link} (Notice: DB record error: ${dbErr.message})`);
+            }
+        });
+
+        // Command: /extend @username [hours]
+        this.bot.command('extend', async (ctx) => {
+            const text = ctx.message?.text || '';
+            const parts = text.split(/\s+/).filter(Boolean);
+
+            if (parts.length < 2) {
+                return ctx.reply(
+                    `⏳ *HOW TO EXTEND A MEMBER'S ACCESS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `*Usage:*\n\`/extend @username [hours/days]\`\n\n` +
+                    `*Examples:*\n` +
+                    `• \`/extend @john 24h\` (Extends by 24 hours)\n` +
+                    `• \`/extend @sarah 48h\` (Extends by 48 hours)\n` +
+                    `• \`/extend @mike 7d\` (Extends by 7 days)`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            const cleanUser = parts[1].replace('@', '').trim().toLowerCase();
+            let hoursToAdd = 24;
+            if (parts[2]) {
+                const dur = parts[2].toLowerCase();
+                if (dur.endsWith('d')) hoursToAdd = parseInt(dur) * 24;
+                else if (dur.endsWith('h')) hoursToAdd = parseInt(dur);
+                else if (!isNaN(dur)) hoursToAdd = parseInt(dur);
+            }
+            if (isNaN(hoursToAdd) || hoursToAdd <= 0) hoursToAdd = 24;
+
+            try {
+                const member = await ChannelMember.findOne({
+                    username: cleanUser,
+                    isActive: true
+                }).sort({ createdAt: -1 });
+
+                if (!member) {
+                    return ctx.reply(`❌ No active membership or pending trial found for @${cleanUser}.`);
+                }
+
+                const baseTime = (member.expiresAt && member.expiresAt > new Date()) ? member.expiresAt.getTime() : Date.now();
+                member.expiresAt = new Date(baseTime + (hoursToAdd * 3600000));
+                member.status = 'ACTIVE';
+                member.isActive = true;
+                await member.save();
+
+                const remainingHours = Math.max(1, Math.round((member.expiresAt.getTime() - Date.now()) / 3600000));
+                await ctx.reply(
+                    `✅ *VIP Pass Extended for @${cleanUser}!*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `• *Added:* +${hoursToAdd} Hours\n` +
+                    `• *New Expiration:* \`${member.expiresAt.toLocaleString()}\`\n` +
+                    `• *Total Remaining:* ~${remainingHours} Hours`,
+                    { parse_mode: 'Markdown' }
+                );
+
+                // Send extension confirmation to user if possible
+                if (member.telegramUserId) {
+                    try {
+                        await this.bot.telegram.sendMessage(
+                            member.telegramUserId,
+                            `🎁 *Good news!* Your VIP trial access has been extended by +${hoursToAdd} hours.\nEnjoy the signals!`,
+                            { parse_mode: 'Markdown' }
+                        );
+                    } catch {}
+                }
+            } catch (e) {
+                ctx.reply(`❌ Error extending member: ${e.message}`);
+            }
+        });
+
+        // Command: /grant @username [tier] [duration]
+        this.bot.command('grant', async (ctx) => {
+            const text = ctx.message?.text || '';
+            const parts = text.split(/\s+/).filter(Boolean);
+
+            if (parts.length < 2) {
+                return ctx.reply(
+                    `👑 *HOW TO GRANT PAID VIP ACCESS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `*Usage:*\n\`/grant @username [tier] [duration]\`\n\n` +
+                    `*Examples:*\n` +
+                    `• \`/grant @john tier1 30d\` (Tier 1 Signals — 30 Days)\n` +
+                    `• \`/grant @sarah tier2 30d\` (Tier 2 Autopilot Bot — 30 Days)\n` +
+                    `• \`/grant @mike lifetime\` (Lifetime Whale Syndicate — Forever)`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            const cleanUser = parts[1].replace('@', '').trim().toLowerCase();
+            const rawTier = (parts[2] || 'tier1').toLowerCase();
+            const tier = rawTier.includes('2') || rawTier.includes('bot')
+                ? 'TIER_2_BOT'
+                : rawTier.includes('life')
+                ? 'TIER_3_LIFETIME'
+                : 'TIER_1_SIGNALS';
+
+            let days = 30;
+            if (tier === 'TIER_3_LIFETIME') {
+                days = 36500; // 100 years
+            } else if (parts[3]) {
+                const dur = parts[3].toLowerCase();
+                if (dur.endsWith('d')) days = parseInt(dur);
+                else if (dur.endsWith('m')) days = parseInt(dur) * 30;
+                else if (!isNaN(dur)) days = parseInt(dur);
+            }
+            if (isNaN(days) || days <= 0) days = 30;
+
+            const channelId = await this.getTargetChannelId();
+            if (!channelId) {
+                return ctx.reply(`⚠️ No VIP Channel linked! Run /setchannel <channel_id> first.`);
+            }
+
+            try {
+                let member = await ChannelMember.findOne({
+                    username: cleanUser,
+                    isActive: true
+                }).sort({ createdAt: -1 });
+
+                const expiresAt = new Date(Date.now() + (days * 86400000));
+
+                if (member) {
+                    member.tier = tier;
+                    member.expiresAt = expiresAt;
+                    member.status = 'ACTIVE';
+                    member.isActive = true;
+                    await member.save();
+
+                    ctx.reply(
+                        `👑 *Upgraded @${cleanUser} to ${tier}!*\n` +
+                        `• *Expires:* \`${tier === 'TIER_3_LIFETIME' ? 'Never (Lifetime)' : expiresAt.toLocaleDateString()}\`\n` +
+                        `Access confirmed in VIP Channel.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } else {
+                    const invite = await this.bot.telegram.createChatInviteLink(channelId, {
+                        name: `VIP ${tier}: @${cleanUser}`,
+                        member_limit: 1
+                    });
+
+                    await ChannelMember.create({
+                        username: cleanUser,
+                        channelId: String(channelId),
+                        tier,
+                        inviteLink: invite.invite_link,
+                        durationHours: days * 24,
+                        status: 'PENDING_JOIN',
+                        expiresAt,
+                        isActive: true,
+                        addedByAdmin: String(ctx.from?.id || 'admin')
+                    });
+
+                    ctx.reply(
+                        `👑 *Paid Access Granted for @${cleanUser} (${tier})!*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `🔗 *Single-Use VIP Invite Link:*\n${invite.invite_link}\n\n` +
+                        `• *Duration:* ${days >= 36500 ? 'Lifetime Access' : `${days} Days`}\n` +
+                        `Send this link to @${cleanUser} to join the VIP Channel.`,
+                        { parse_mode: 'Markdown', disable_web_page_preview: true }
+                    );
+                }
+            } catch (e) {
+                ctx.reply(`❌ Error granting access: ${e.message}`);
+            }
+        });
+
+        // Command: /revoke @username
+        this.bot.command('revoke', async (ctx) => {
+            const text = ctx.message?.text || '';
+            const parts = text.split(/\s+/).filter(Boolean);
+
+            if (parts.length < 2) {
+                return ctx.reply(`*Usage:* \`/revoke @username\` to remove a user from the VIP channel.`);
+            }
+
+            const cleanUser = parts[1].replace('@', '').trim().toLowerCase();
+            try {
+                const member = await ChannelMember.findOne({
+                    username: cleanUser,
+                    isActive: true
+                }).sort({ createdAt: -1 });
+
+                if (!member) {
+                    return ctx.reply(`❌ No active member found for @${cleanUser}.`);
+                }
+
+                if (member.telegramUserId && member.channelId) {
+                    try {
+                        await this.bot.telegram.banChatMember(member.channelId, Number(member.telegramUserId), { until_date: Math.floor(Date.now() / 1000) + 60 });
+                        await this.bot.telegram.unbanChatMember(member.channelId, Number(member.telegramUserId));
+                    } catch (kickErr) {
+                        console.warn(`[CHANNEL-MGR] Kick notice:`, kickErr.message);
+                    }
+                }
+
+                member.isActive = false;
+                member.status = 'REVOKED';
+                member.kickedAt = new Date();
+                await member.save();
+
+                ctx.reply(`🚫 *Revoked VIP Access:* Removed @${cleanUser} from the channel.`, { parse_mode: 'Markdown' });
+            } catch (e) {
+                ctx.reply(`❌ Error revoking member: ${e.message}`);
+            }
+        });
+
+        // Command: /members
+        this.bot.command('members', async (ctx) => {
+            try {
+                const activeMembers = await ChannelMember.find({ isActive: true }).sort({ expiresAt: 1 });
+                if (activeMembers.length === 0) {
+                    return ctx.reply(`📋 *No active demo or paid members found.*`);
+                }
+
+                let demoList = [];
+                let paidList = [];
+                let pendingList = [];
+                const now = Date.now();
+
+                for (const m of activeMembers) {
+                    const handle = m.username ? `@${m.username}` : `ID: ${m.telegramUserId}`;
+                    if (m.status === 'PENDING_JOIN') {
+                        pendingList.push(`• ${handle} (Invite created, waiting to join)`);
+                    } else if (m.tier === 'DEMO') {
+                        const msLeft = m.expiresAt ? m.expiresAt.getTime() - now : 0;
+                        const hoursLeft = Math.floor(msLeft / 3600000);
+                        const minsLeft = Math.floor((msLeft % 3600000) / 60000);
+                        const timeLeftStr = hoursLeft > 0 ? `${hoursLeft}h ${minsLeft}m left` : `${Math.max(0, minsLeft)}m left`;
+                        demoList.push(`• ${handle} — ⏳ *${timeLeftStr}*`);
+                    } else {
+                        const tierName = m.tier === 'TIER_1_SIGNALS' ? 'Tier 1 Signals' : m.tier === 'TIER_2_BOT' ? 'Tier 2 Bot' : 'Lifetime';
+                        const dateStr = m.expiresAt ? m.expiresAt.toLocaleDateString() : 'Never';
+                        paidList.push(`• ${handle} — 👑 *${tierName}* (Exp: ${dateStr})`);
+                    }
+                }
+
+                let resp = `👥 *RAZOR VIP CHANNEL MEMBERSHIP DASHBOARD*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+                if (demoList.length > 0) {
+                    resp += `🎟️ *Active 24h Demos (${demoList.length}):*\n${demoList.join('\n')}\n\n`;
+                }
+                if (paidList.length > 0) {
+                    resp += `👑 *Active Paid Subscribers (${paidList.length}):*\n${paidList.join('\n')}\n\n`;
+                }
+                if (pendingList.length > 0) {
+                    resp += `⏳ *Pending Invites (${pendingList.length}):*\n${pendingList.join('\n')}\n\n`;
+                }
+
+                resp += `💡 *Admin Commands:*\n• Extend: \`/extend @user 24h\`\n• Grant Paid: \`/grant @user tier1 30d\`\n• Revoke: \`/revoke @user\``;
+
+                await ctx.reply(resp, { parse_mode: 'Markdown' });
+            } catch (e) {
+                ctx.reply(`❌ Error loading members: ${e.message}`);
+            }
+        });
+
+        // Command: /setchannel <channel_id>
+        this.bot.command('setchannel', async (ctx) => {
+            const text = ctx.message?.text || '';
+            const parts = text.split(/\s+/).filter(Boolean);
+
+            if (parts.length < 2) {
+                const currentChannel = await this.getTargetChannelId();
+                return ctx.reply(
+                    `⚙️ *HOW TO LINK YOUR VIP CHANNEL*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `*Current Linked Channel:* \`${currentChannel || 'None'}\`\n\n` +
+                    `*Usage:*\n\`/setchannel <channel_id>\`\n\n` +
+                    `*Example:*\n\`/setchannel -1003985019043\`\n\n` +
+                    `💡 *How to get Channel ID:*\n` +
+                    `1. Create a Private Telegram Channel.\n` +
+                    `2. Add this bot as an **Administrator** with Invite Users and Ban Users permissions.\n` +
+                    `3. Forward any post from that channel to @userinfobot or @JsonDumpBot to get the \`-100...\` Channel ID.\n` +
+                    `4. Run \`/setchannel -100...\` here!`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+
+            const channelId = parts[1].trim();
+            try {
+                const chat = await this.bot.telegram.getChat(channelId);
+                await BotSettings.findOneAndUpdate(
+                    { key: 'global' },
+                    { vipChannelId: channelId },
+                    { upsert: true, new: true }
+                );
+                this.configuredAlertChannel = channelId;
+
+                ctx.reply(
+                    `✅ *VIP Channel Successfully Linked!*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `• *Channel Title:* ${chat.title || 'Private Channel'}\n` +
+                    `• *Channel ID:* \`${channelId}\`\n` +
+                    `• *Status:* Confirmed Administrator with Invite & Kick rights.\n\n` +
+                    `All single-use demo invite links and VIP signals are now linked to this channel!`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch (e) {
+                ctx.reply(
+                    `❌ *Could not link channel:* ${e.message}\n\n` +
+                    `💡 *Make sure:*\n1. The channel ID starts with \`-100\`.\n2. The bot is already an **Administrator** in the channel!`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+        });
+
+        // Command: /pricing
+        this.bot.command('pricing', async (ctx) => {
+            const pricingMsg =
+`💎 *RAZOR ALPHA VIP — SUBSCRIPTION PLANS* 💎\n` +
+`━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+`1️⃣ *TIER 1: VIP SIGNAL PASS*\n` +
+`💰 *Price:* \`0.75 SOL / Month\` (~$110 - $130)\n` +
+`👉 *What You Get:*\n` +
+`• 24/7 access to the private VIP Signal Channel.\n` +
+`• Instant BUY alerts the second top insiders buy.\n` +
+`• Instant SELL alerts when it's time to take profit.\n` +
+`• Real dollar profit and ROI proof on every call.\n` +
+`• Best for: Manual traders on their phone.\n\n` +
+`2️⃣ *TIER 2: AUTOPILOT BOT* ⭐ *Most Popular*\n` +
+`💰 *Price:* \`2.50 SOL / Month\` (~$350 - $400)\n` +
+`👉 *What You Get:*\n` +
+`• Everything in Tier 1 (VIP Signals).\n` +
+`• Dedicated automated bot running on your personal wallet.\n` +
+`• Auto-buys when top insiders buy.\n` +
+`• Auto-sells when insiders exit or at 2x TP / -20% SL.\n` +
+`• Built-in 10% max portfolio risk cap.\n` +
+`• Best for: Hands-free profits while sleeping or working.\n\n` +
+`3️⃣ *TIER 3: LIFETIME WHALE SYNDICATE*\n` +
+`💰 *Price:* \`10.00 SOL One-Time\` (~$1,500)\n` +
+`👉 *What You Get:*\n` +
+`• Lifetime access to VIP Signals and Autopilot Bot forever.\n` +
+`• Never pay monthly subscription fees again.\n` +
+`• Track up to 3 custom whale wallets of your choice.\n` +
+`• Fast-lane priority execution.\n\n` +
+`━━━━━━━━━━━━━━━━━━━━━━\n` +
+`💳 *HOW TO ACTIVATE:*\n` +
+`Send the subscription amount to our official bot address:\n` +
+`\`${WALLET_PUBLIC_KEY || 'Contact Admin'}\`\n\n` +
+`After sending, contact the admin with your transaction hash to activate instantly!`;
+
+            await ctx.reply(pricingMsg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        });
+
+        // Listener: chat_member (Triggers when user joins via single-use invite link)
+        this.bot.on('chat_member', async (ctx) => {
+            try {
+                const update = ctx.chatMember;
+                const chat = update.chat;
+                const newMember = update.new_chat_member;
+                const oldMember = update.old_chat_member;
+
+                // Detect when a user joins the channel
+                if (newMember.status === 'member' && oldMember.status !== 'member') {
+                    const userId = String(newMember.user.id);
+                    const username = newMember.user.username ? newMember.user.username.toLowerCase() : null;
+                    const inviteUsed = update.invite_link?.invite_link;
+
+                    console.log(`[CHANNEL-MGR] 👤 User joined channel ${chat.id}: @${username || userId}`);
+
+                    let memberRecord = null;
+                    if (inviteUsed) {
+                        memberRecord = await ChannelMember.findOne({ inviteLink: inviteUsed });
+                    }
+                    if (!memberRecord && username) {
+                        memberRecord = await ChannelMember.findOne({ username, status: 'PENDING_JOIN' });
+                    }
+
+                    if (memberRecord) {
+                        memberRecord.telegramUserId = userId;
+                        if (username) memberRecord.username = username;
+                        memberRecord.joinedAt = new Date();
+                        memberRecord.status = 'ACTIVE';
+                        memberRecord.isActive = true;
+                        memberRecord.expiresAt = new Date(Date.now() + (memberRecord.durationHours || 24) * 3600000);
+                        await memberRecord.save();
+
+                        console.log(`[CHANNEL-MGR] ⏱️ Started ${memberRecord.durationHours}h countdown for @${username || userId}. Expires at: ${memberRecord.expiresAt.toISOString()}`);
+
+                        // Send welcome DM to user
+                        try {
+                            const welcomeMsg =
+`🎉 *Welcome to Razor Alpha VIP Demo!*
+
+Your *${memberRecord.durationHours}-Hour Pass* is now active!
+
+👉 *How it works:*
+• When our top insider buys a token, you will get a 🟢 *NEW BUY SIGNAL* with the contract address.
+• When they cash out, you will get a 🔴 *SELL NOW & TAKE PROFIT* alert.
+
+⏱️ *Your Trial Expires:* \`${memberRecord.expiresAt.toLocaleString()}\`
+
+💡 Type /pricing anytime to view full subscription plans.`;
+
+                            await this.bot.telegram.sendMessage(userId, welcomeMsg, { parse_mode: 'Markdown' });
+                        } catch {}
+                    }
+                }
+            } catch (e) {
+                console.warn("[CHANNEL-MGR] ⚠️ Error in chat_member handler:", e.message);
+            }
+        });
+    }
+
+    startExpirationWorker() {
+        if (this.expirationInterval) clearInterval(this.expirationInterval);
+        // Run every 2 minutes
+        this.expirationInterval = setInterval(() => this.checkExpiredMembers(), 120000);
+        console.log("[CHANNEL-MGR] ⏱️ Member auto-kick expiration worker active (checking every 2m).");
+    }
+
+    async checkExpiredMembers() {
+        if (!this.bot) return;
+        try {
+            const now = new Date();
+            const expiredMembers = await ChannelMember.find({
+                isActive: true,
+                status: 'ACTIVE',
+                expiresAt: { $lte: now }
+            });
+
+            for (const m of expiredMembers) {
+                try {
+                    console.log(`[CHANNEL-MGR] ⏳ Demo expired for @${m.username || m.telegramUserId}. Removing from channel ${m.channelId}...`);
+
+                    if (m.telegramUserId && m.channelId) {
+                        // 1. Kick user from channel (ban for 60s)
+                        await this.bot.telegram.banChatMember(m.channelId, Number(m.telegramUserId), { until_date: Math.floor(Date.now() / 1000) + 60 });
+                        // 2. Immediately unban so they can rejoin in future once they pay
+                        await this.bot.telegram.unbanChatMember(m.channelId, Number(m.telegramUserId));
+                    }
+
+                    m.isActive = false;
+                    m.status = 'EXPIRED';
+                    m.kickedAt = new Date();
+                    await m.save();
+
+                    console.log(`[CHANNEL-MGR] ✅ Successfully kicked expired member @${m.username || m.telegramUserId}.`);
+
+                    // 3. Send conversion / upgrade pitch DM to user
+                    if (m.telegramUserId) {
+                        try {
+                            const upgradePitch =
+`⏳ *Your Razor VIP Demo Pass has Expired!*
+
+We hope you enjoyed watching live top-trader calls! Over your trial, Razor closed multiple profitable meme coin setups.
+
+🚀 *Ready to keep winning? Upgrade your access:*
+
+1️⃣ *Tier 1: VIP Signal Pass* — \`0.75 SOL / Month\`
+• Live BUY & SELL signals on Telegram
+
+2️⃣ *Tier 2: Autopilot Bot* — \`2.5 SOL / Month\` ⭐ *Most Popular*
+• Bot automatically buys & sells in your personal wallet while you sleep
+
+3️⃣ *Tier 3: Lifetime Whale Syndicate* — \`10 SOL One-Time\`
+• Lifetime VIP access forever (no monthly fees) + custom wallet tracking
+
+👉 *To activate:* Contact our admin or send payment to the bot deposit address:
+\`${WALLET_PUBLIC_KEY || 'Contact Admin'}\`
+`;
+                            await this.bot.telegram.sendMessage(m.telegramUserId, upgradePitch, {
+                                parse_mode: 'Markdown',
+                                disable_web_page_preview: true
+                            });
+                        } catch {}
+                    }
+                } catch (kickErr) {
+                    console.warn(`[CHANNEL-MGR] ⚠️ Could not kick member ${m.telegramUserId}:`, kickErr.message);
+                }
+            }
+        } catch (e) {
+            console.error("[CHANNEL-MGR] ❌ Error in checkExpiredMembers worker:", e.message);
+        }
+    }
+
     async sendAlert(message) {
         if (!this.bot) return;
 
@@ -1056,6 +1639,14 @@ Welcome to the Razor autonomous trading engine. Select any module below for in-d
         const targets = new Set();
         if (this.configuredAlertChannel) targets.add(this.configuredAlertChannel);
         if (process.env.TELEGRAM_ALERTS_CHANNEL) targets.add(process.env.TELEGRAM_ALERTS_CHANNEL);
+
+        // Also add dynamically linked VIP channel from BotSettings
+        try {
+            const settings = await BotSettings.findOne({ key: 'global' });
+            if (settings && settings.vipChannelId) {
+                targets.add(settings.vipChannelId);
+            }
+        } catch {}
 
         // Also broadcast to users who registered watched wallets in DB
         try {

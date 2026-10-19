@@ -16,6 +16,10 @@ const BotSettingsSchema = new Schema(
       type: Number,
       default: 10000, // $10k threshold per user request
     },
+    vipChannelId: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );
