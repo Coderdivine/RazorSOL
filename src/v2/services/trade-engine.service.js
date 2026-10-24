@@ -29,9 +29,9 @@ function getTokenLinks(mint) {
         isPump,
         tokenUrl: isPump ? `https://pump.fun/${mint}` : `https://dexscreener.com/solana/${mint}`,
         dexUrl: `https://dexscreener.com/solana/${mint}`,
-        footerButtons: isPump
-            ? `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`
-            : `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 🔎 [Solscan](https://solscan.io/token/${mint})`
+        pumpUrl: `https://pump.fun/${mint}`,
+        solscanUrl: `https://solscan.io/token/${mint}`,
+        footerButtons: `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint}) | 🔎 [Solscan](https://solscan.io/token/${mint})`
     };
 }
 
@@ -478,7 +478,7 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
+        telegramService.sendAlert(adminAlertMsg, groupAlertMsg, tradeEvent.mint);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -678,7 +678,7 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
+        telegramService.sendAlert(adminAlertMsg, groupAlertMsg, tradeEvent.mint);
 
         console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
@@ -796,7 +796,7 @@ class TradeEngine {
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
-                    telegramService.sendAlert(buyAlert);
+                    telegramService.sendAlert(buyAlert, null, mint);
 
                     if(isReentry && tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
@@ -830,7 +830,7 @@ class TradeEngine {
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
-                    telegramService.sendAlert(sellAlert);
+                    telegramService.sendAlert(sellAlert, null, mint);
 
                     if(tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);

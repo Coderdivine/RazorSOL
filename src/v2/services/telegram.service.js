@@ -1949,11 +1949,29 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         }
     }
 
-    async sendAlert(adminMessage, groupMessage = null) {
+    async sendAlert(adminMessage, groupMessage = null, mint = null) {
         if (!this.bot) return;
 
         const adminMsg = adminMessage;
         const groupMsg = groupMessage || adminMessage;
+
+        // Auto-extract mint from CA line if not explicitly passed
+        let targetMint = mint;
+        if (!targetMint) {
+            const match = adminMsg.match(/🏷️ \*CA:\* `([1-9A-HJ-NP-Za-km-z]{32,44})`/);
+            if (match) targetMint = match[1];
+        }
+
+        let inlineMarkup = null;
+        if (targetMint) {
+            inlineMarkup = Markup.inlineKeyboard([
+                [
+                    Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
+                    Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`),
+                    Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`)
+                ]
+            ]).reply_markup;
+        }
 
         // 1. Identify VIP channel (Group destination for prospects/subscribers)
         let vipChannelId = null;
@@ -2043,16 +2061,20 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         // Send full details to Admin
         for (const targetId of adminTargets) {
+            const sendOpts = {
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            };
+            if (inlineMarkup) sendOpts.reply_markup = inlineMarkup;
+
             try {
-                await this.bot.telegram.sendMessage(targetId, adminMsg, {
-                    parse_mode: 'Markdown',
-                    disable_web_page_preview: true
-                });
+                await this.bot.telegram.sendMessage(targetId, adminMsg, sendOpts);
             } catch (err) {
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = adminMsg.replace(/[*_`\[\]()]/g, '');
-                        await this.bot.telegram.sendMessage(targetId, plainText);
+                        const fallbackOpts = inlineMarkup ? { reply_markup: inlineMarkup } : {};
+                        await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                     } catch {}
                 } else {
                     console.warn(`[TELEGRAM] ⚠️ Admin alert dispatch notice for ${targetId}:`, err.message);
@@ -2062,16 +2084,20 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         // Send to Group
         for (const targetId of groupTargets) {
+            const sendOpts = {
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            };
+            if (inlineMarkup) sendOpts.reply_markup = inlineMarkup;
+
             try {
-                await this.bot.telegram.sendMessage(targetId, groupMsg, {
-                    parse_mode: 'Markdown',
-                    disable_web_page_preview: true
-                });
+                await this.bot.telegram.sendMessage(targetId, groupMsg, sendOpts);
             } catch (err) {
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
-                        await this.bot.telegram.sendMessage(targetId, plainText);
+                        const fallbackOpts = inlineMarkup ? { reply_markup: inlineMarkup } : {};
+                        await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                     } catch {}
                 } else {
                     console.warn(`[TELEGRAM] ⚠️ Group alert dispatch notice for ${targetId}:`, err.message);
