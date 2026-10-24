@@ -1421,7 +1421,8 @@ After sending, contact the admin with your transaction hash to activate instantl
         let response = `👁️ *ACTIVE MONITORED WHALES (${wallets.length})*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         wallets.forEach((w, i) => {
             const short = `${w.walletAddress.substring(0, 6)}...${w.walletAddress.substring(w.walletAddress.length - 6)}`;
-            response += `${i + 1}. [\`${short}\`](https://solscan.io/account/${w.walletAddress})\n   \`${w.walletAddress}\`\n\n`;
+            const nameBadge = (w.label && w.label !== 'Whale Wallet') ? ` 🏷️ *${w.label}*` : '';
+            response += `${i + 1}.${nameBadge}\n   [\`${short}\`](https://solscan.io/account/${w.walletAddress})\n   \`${w.walletAddress}\`\n\n`;
         });
         
         response += `_Tap a button below to remove, or use \`/remove <address>\`_`;
@@ -1429,8 +1430,9 @@ After sending, contact the admin with your transaction hash to activate instantl
         // Generate quick action buttons for monitored wallets
         const inlineRows = wallets.map(w => {
             const short = `${w.walletAddress.substring(0, 4)}...${w.walletAddress.substring(w.walletAddress.length - 4)}`;
+            const btnName = (w.label && w.label !== 'Whale Wallet') ? w.label : short;
             return [
-                Markup.button.callback(`🗑️ Untrack ${short}`, `unwatch:${w.walletAddress}`),
+                Markup.button.callback(`🗑️ Untrack ${btnName}`, `unwatch:${w.walletAddress}`),
                 Markup.button.url(`🔎 Solscan`, `https://solscan.io/account/${w.walletAddress}`)
             ];
         });

@@ -338,6 +338,7 @@ class TradeEngine {
         const mcTracker = formatMarketCap(mcUSD);
         const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
+        const whaleLabel = (watchedWallet.label && watchedWallet.label !== 'Whale Wallet') ? ` *(${watchedWallet.label})*` : '';
         const receivedSol = tradeEvent.solAmount || 0;
         const solPrice = solanaService.getSolPriceUSD();
         const receivedUsd = tradeEvent.usdAmount && tradeEvent.usdAmount > 1 ? tradeEvent.usdAmount : (receivedSol * solPrice);
@@ -460,7 +461,7 @@ class TradeEngine {
         // Admin Message (with FULL original details, whale Solscan link & address)
         const adminAlertMsg =
 `📉 *Whale Sell Detected!* 📉\n\n` +
-`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
@@ -606,6 +607,7 @@ class TradeEngine {
         const mcTracker = formatMarketCap(mcUSD);
         const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
+        const whaleLabel = (watchedWallet.label && watchedWallet.label !== 'Whale Wallet') ? ` *(${watchedWallet.label})*` : '';
 
         const spentDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
             ? `${spentSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
@@ -659,7 +661,7 @@ class TradeEngine {
         // Admin Message (with FULL original details, whale Solscan link & address)
         const adminAlertMsg =
 `🚨 *Whale Buy Detected!* 🚨\n\n` +
-`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
 `💰 *Whale Spent:* ${spentDesc}\n` +
