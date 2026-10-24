@@ -119,6 +119,76 @@ class SolanaService {
         return Number.isFinite(num) ? num : 0;
     }
 
+    // Direct On-Chain Token Metadata Resolver (Token-2022 Extensions & Metaplex PDA)
+    async fetchOnChainMetadata(mint) {
+        if (!mint || typeof mint !== 'string') return null;
+        try {
+            const mintPubkey = new PublicKey(mint);
+
+            // 1. Try Token-2022 parsed extensions (e.g. Nullmask and other Token-2022 mints)
+            try {
+                let parsed = null;
+                try {
+                    parsed = await this.connection.getParsedAccountInfo(mintPubkey);
+                } catch {
+                    const sec = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
+                    parsed = await sec.getParsedAccountInfo(mintPubkey);
+                }
+
+                const extensions = parsed?.value?.data?.parsed?.info?.extensions;
+                if (Array.isArray(extensions)) {
+                    const metaExt = extensions.find(e => e.extension === 'tokenMetadata');
+                    if (metaExt && metaExt.state && metaExt.state.name) {
+                        const name = (metaExt.state.name || '').replace(/\0/g, '').trim();
+                        const symbol = (metaExt.state.symbol || '').replace(/\0/g, '').trim();
+                        if (name) {
+                            return { name, symbol: symbol || 'SOL' };
+                        }
+                    }
+                }
+            } catch (extErr) {
+                // Fallback to Metaplex
+            }
+
+            // 2. Try Metaplex Metadata PDA (Standard SPL tokens & Pump.fun tokens)
+            try {
+                const metaplexId = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+                const [pda] = PublicKey.findProgramAddressSync(
+                    [Buffer.from('metadata'), metaplexId.toBuffer(), mintPubkey.toBuffer()],
+                    metaplexId
+                );
+                let acc = null;
+                try {
+                    acc = await this.connection.getAccountInfo(pda);
+                } catch {
+                    const sec = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
+                    acc = await sec.getAccountInfo(pda);
+                }
+
+                if (acc && acc.data && acc.data.length > 70) {
+                    const data = acc.data;
+                    const nameLen = data.readUInt32LE(65);
+                    if (nameLen > 0 && nameLen < 100) {
+                        const name = data.slice(69, 69 + nameLen).toString('utf8').replace(/\0/g, '').trim();
+                        const symbolOffset = 69 + nameLen;
+                        const symbolLen = data.readUInt32LE(symbolOffset);
+                        const symbol = (symbolLen > 0 && symbolLen < 30)
+                            ? data.slice(symbolOffset + 4, symbolOffset + 4 + symbolLen).toString('utf8').replace(/\0/g, '').trim()
+                            : '';
+                        if (name) {
+                            return { name, symbol: symbol || 'SOL' };
+                        }
+                    }
+                }
+            } catch (metaErr) {
+                // Non-blocking
+            }
+        } catch (err) {
+            console.warn(`[SOLANA-RPC] ⚠️ On-chain metadata lookup error for ${mint}:`, err.message);
+        }
+        return null;
+    }
+
     // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry & RPC fallback
     async fetchParsedTransactionSafe(signature, maxRetries = 3) {
         const publicEndpoints = [this.rpcUrl, 'https://solana-rpc.publicnode.com'].filter(Boolean);

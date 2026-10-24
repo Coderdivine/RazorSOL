@@ -9,6 +9,32 @@ const WhalePosition = require('../models/WhalePosition');
 
 const { WALLET_PUBLIC_KEY, WALLET_PRIVATE_KEY, SOLANA_RPC_URL } = process.env;
 
+function formatMarketCap(mcUSD) {
+    if (!mcUSD || mcUSD <= 0) return 'Live on DEX';
+    if (mcUSD >= 1_000_000_000) {
+        return `$${(mcUSD / 1_000_000_000).toFixed(2)}B`;
+    }
+    if (mcUSD >= 1_000_000) {
+        return `$${(mcUSD / 1_000_000).toFixed(2)}M`;
+    }
+    if (mcUSD >= 1_000) {
+        return `$${(mcUSD / 1_000).toFixed(1)}k`;
+    }
+    return `$${Math.round(mcUSD).toLocaleString('en-US')}`;
+}
+
+function getTokenLinks(mint) {
+    const isPump = Boolean(mint && mint.endsWith('pump'));
+    return {
+        isPump,
+        tokenUrl: isPump ? `https://pump.fun/${mint}` : `https://dexscreener.com/solana/${mint}`,
+        dexUrl: `https://dexscreener.com/solana/${mint}`,
+        footerButtons: isPump
+            ? `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`
+            : `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 🔎 [Solscan](https://solscan.io/token/${mint})`
+    };
+}
+
 class TradeEngine {
     constructor() {
         this.connection = new Connection(SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", 'confirmed');
@@ -172,21 +198,127 @@ class TradeEngine {
         }
     }
 
-    async fetchTokenMetadataFallback(mint) {
-        try {
-            const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 3500 });
-            const pair = res.data?.pairs?.[0];
-            if (pair && pair.baseToken) {
-                return {
-                    name: pair.baseToken.name || 'Unknown',
-                    symbol: pair.baseToken.symbol || 'UNK',
-                    marketCapUSD: pair.marketCap || pair.fdv || 0
-                };
-            }
-        } catch (e) {
-            // Ignore DexScreener fallback timeout
+    async resolveTokenMetadata(mint, fallbackMcSol = 0) {
+        if (!mint || typeof mint !== 'string') {
+            return { name: 'Solana Token', symbol: 'SOL', marketCapUSD: 0 };
         }
-        return null;
+
+        const isInvalid = (name, symbol) => {
+            if (!name || !symbol) return true;
+            const n = String(name).trim().toLowerCase();
+            const s = String(symbol).trim().toLowerCase();
+            return n === 'unknown' || n === 'unknown token' || s === 'unk' || n === 'solana token';
+        };
+
+        // 1. In-memory cache
+        let cached = this.tokenCache.get(mint);
+        if (cached && !isInvalid(cached.name, cached.symbol)) {
+            let mc = cached.marketCapUSD || (cached.highestMCReached ? cached.highestMCReached * solanaService.getSolPriceUSD() : 0);
+            if (!mc && fallbackMcSol) mc = fallbackMcSol * solanaService.getSolPriceUSD();
+            return {
+                name: cached.name,
+                symbol: cached.symbol,
+                marketCapUSD: mc || 0
+            };
+        }
+
+        // 2. MongoDB TokenMetrics
+        try {
+            const dbToken = await TokenMetrics.findOne({ mint });
+            if (dbToken && !isInvalid(dbToken.name, dbToken.symbol)) {
+                let mc = (dbToken.highestMCReached || 0) * solanaService.getSolPriceUSD();
+                if (!mc && fallbackMcSol) mc = fallbackMcSol * solanaService.getSolPriceUSD();
+                const resolved = {
+                    name: dbToken.name,
+                    symbol: dbToken.symbol,
+                    marketCapUSD: mc || 0
+                };
+                this.tokenCache.set(mint, { ...(dbToken.toObject ? dbToken.toObject() : dbToken), ...resolved });
+                return resolved;
+            }
+        } catch (dbErr) {
+            // Non-blocking DB read error
+        }
+
+        let resolvedName = null;
+        let resolvedSymbol = null;
+        let resolvedMC = fallbackMcSol ? (fallbackMcSol * solanaService.getSolPriceUSD()) : 0;
+
+        // 3. Query DexScreener (highest-priority for active Raydium/DEX tokens and pump tokens)
+        try {
+            const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 4000 });
+            if (res.data?.pairs?.length > 0) {
+                const sortedPairs = [...res.data.pairs].sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                for (const p of sortedPairs) {
+                    if (p.baseToken && p.baseToken.address === mint) {
+                        resolvedName = p.baseToken.name;
+                        resolvedSymbol = p.baseToken.symbol;
+                        resolvedMC = p.marketCap || p.fdv || resolvedMC;
+                        break;
+                    } else if (p.quoteToken && p.quoteToken.address === mint) {
+                        resolvedName = p.quoteToken.name;
+                        resolvedSymbol = p.quoteToken.symbol;
+                        resolvedMC = p.marketCap || p.fdv || resolvedMC;
+                        break;
+                    }
+                }
+                if (!resolvedName && sortedPairs[0]?.baseToken) {
+                    resolvedName = sortedPairs[0].baseToken.name;
+                    resolvedSymbol = sortedPairs[0].baseToken.symbol;
+                    resolvedMC = sortedPairs[0].marketCap || sortedPairs[0].fdv || resolvedMC;
+                }
+            }
+        } catch (dexErr) {
+            // DexScreener timeout
+        }
+
+        // 4. On-chain Solana RPC (Token-2022 Extensions & Metaplex PDA)
+        if (isInvalid(resolvedName, resolvedSymbol)) {
+            try {
+                const onChain = await solanaService.fetchOnChainMetadata(mint);
+                if (onChain && onChain.name && !isInvalid(onChain.name, onChain.symbol)) {
+                    resolvedName = onChain.name;
+                    resolvedSymbol = onChain.symbol || 'SOL';
+                }
+            } catch (rpcErr) {
+                console.warn(`[TRADE-ENGINE] ⚠️ On-chain metadata lookup error for ${mint}:`, rpcErr.message);
+            }
+        }
+
+        const finalName = (resolvedName && !isInvalid(resolvedName, 'OK')) ? resolvedName.trim() : 'Solana Token';
+        const finalSymbol = (resolvedSymbol && resolvedSymbol !== 'UNK') ? resolvedSymbol.trim() : 'SOL';
+
+        const tokenObj = {
+            mint,
+            name: finalName,
+            symbol: finalSymbol,
+            marketCapUSD: resolvedMC || 0
+        };
+
+        // Cache in memory
+        this.tokenCache.set(mint, tokenObj);
+
+        // Upsert valid token in MongoDB
+        if (!isInvalid(finalName, finalSymbol)) {
+            try {
+                await TokenMetrics.findOneAndUpdate(
+                    { mint },
+                    {
+                        mint,
+                        name: finalName,
+                        symbol: finalSymbol,
+                        highestMCReached: resolvedMC > 0 ? (resolvedMC / (solanaService.getSolPriceUSD() || 150)) : 0
+                    },
+                    { upsert: true, new: true }
+                );
+            } catch (saveErr) {}
+        }
+
+        return tokenObj;
+    }
+
+    async fetchTokenMetadataFallback(mint) {
+        return await this.resolveTokenMetadata(mint);
     }
 
     async reportWhaleSell(tradeEvent, watchedWallet) {
@@ -200,19 +332,11 @@ class TradeEngine {
             }
         }
 
-        let tokenData = this.tokenCache.get(tradeEvent.mint) || await TokenMetrics.findOne({ mint: tradeEvent.mint });
-        let mcUSD = tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0;
-
-        if (!tokenData || !mcUSD) {
-            const dexData = await this.fetchTokenMetadataFallback(tradeEvent.mint);
-            if (dexData) {
-                if (!tokenData) tokenData = { name: dexData.name, symbol: dexData.symbol };
-                if (!mcUSD && dexData.marketCapUSD) mcUSD = dexData.marketCapUSD;
-            }
-        }
-
+        const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
-        const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Live on DEX';
+        const mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0);
+        const mcTracker = formatMarketCap(mcUSD);
+        const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
         const receivedSol = tradeEvent.solAmount || 0;
         const solPrice = solanaService.getSolPriceUSD();
@@ -337,21 +461,21 @@ class TradeEngine {
         const adminAlertMsg =
 `📉 *Whale Sell Detected!* 📉\n\n` +
 `👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `🗡️ *Razor Bot:* ${razorActionDesc}\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+`${links.footerButtons}`;
 
         // Group Message (whale address kept private, clean signals for members)
         const groupAlertMsg =
 `📉 *Whale Sell Detected!* 📉\n\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
 `📈 *Current MC:* ${mcTracker}\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+`${links.footerButtons}`;
 
         telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
     }
@@ -458,9 +582,11 @@ class TradeEngine {
             console.log(`[TRADE-ENGINE] ℹ️ No SOL spent parsed from event. Skipping copy trade.`);
             return;
         } else {
-            scaleFactor = spentSol / targetWalletBalance;
+            // Normalize scale factor against realistic portfolio floor (prevents 100% on dust trades)
+            const effectivePortfolio = Math.max(targetWalletBalance, 5.0);
+            scaleFactor = Math.min(1.0, Math.max(0.0001, spentSol / effectivePortfolio));
             myTradeSize = this.myBalance * scaleFactor;
-            console.log(`[TRADE-ENGINE] ⚖️ Scale Factor: ${(scaleFactor*100).toFixed(2)}% | Calculated Trade: ${myTradeSize} SOL`);
+            console.log(`[TRADE-ENGINE] ⚖️ Scale Factor: ${(scaleFactor*100).toFixed(2)}% (Bal: ${targetWalletBalance.toFixed(4)}, Effective: ${effectivePortfolio.toFixed(2)}) | Calculated Trade: ${myTradeSize} SOL`);
         }
         
         // Safeguards
@@ -474,22 +600,11 @@ class TradeEngine {
         }
 
         console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
-        let tokenData = this.tokenCache.get(tradeEvent.mint);
-        if(!tokenData) {
-            tokenData = await TokenMetrics.findOne({ mint: tradeEvent.mint });
-        }
-
-        let mcUSD = tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0;
-        if (!tokenData || !mcUSD) {
-            const dexData = await this.fetchTokenMetadataFallback(tradeEvent.mint);
-            if (dexData) {
-                if (!tokenData) tokenData = { name: dexData.name, symbol: dexData.symbol };
-                if (!mcUSD && dexData.marketCapUSD) mcUSD = dexData.marketCapUSD;
-            }
-        }
-
-        const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Unknown Token';
-        const mcTracker = mcUSD > 0 ? `$${mcUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : 'Unknown';
+        const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
+        const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+        const mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0);
+        const mcTracker = formatMarketCap(mcUSD);
+        const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
 
         const spentDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
@@ -536,7 +651,7 @@ class TradeEngine {
         }
 
         const botExecDesc = this.myBalance < 0.005
-            ? `🗡️ *Razor Bot Execution:*\nBuy Amount: 0.0100 SOL (Scale: ${(scaleFactor*100).toFixed(2)}%)\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`
+            ? `🗡️ *Razor Bot Execution:*\nBuy Amount: \`0.0100 SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`
             : `🗡️ *Razor Bot Execution:*\nBuy Amount: \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)`;
 
         const telegramService = require('./telegram.service');
@@ -545,21 +660,21 @@ class TradeEngine {
         const adminAlertMsg =
 `🚨 *Whale Buy Detected!* 🚨\n\n` +
 `👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
 `💰 *Whale Spent:* ${spentDesc}\n` +
 `📈 *Current MC:* ${mcTracker}\n` +
 `${botExecDesc}\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+`${links.footerButtons}`;
 
         // Group Message (whale address kept private, clean signals for members)
         const groupAlertMsg =
 `🚨 *Whale Buy Detected!* 🚨\n\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${tradeEvent.mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
 `💰 *Whale Spent:* ${spentDesc}\n` +
 `📈 *Current MC:* ${mcTracker}\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${tradeEvent.mint}) | 💊 [Pump.fun](https://pump.fun/${tradeEvent.mint})`;
+`${links.footerButtons}`;
 
         telegramService.sendAlert(adminAlertMsg, groupAlertMsg);
 
@@ -663,20 +778,21 @@ class TradeEngine {
                 const telegramService = require('./telegram.service');
 
                 if(action === "buy") {
-                    let tokenData = this.tokenCache.get(mint);
+                    const tokenData = await this.resolveTokenMetadata(mint);
                     const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+                    const links = getTokenLinks(mint);
                     const modeDesc = source === 'COPY_TRADE' 
                         ? `Mirrored Whale [\`${mirroredWallet ? mirroredWallet.substring(0,4)+'...'+mirroredWallet.substring(mirroredWallet.length-4) : 'Whale'}\`](https://solscan.io/account/${mirroredWallet})`
                         : '🔫 5K Milestone Snipe ($10k ➔ $50k)';
 
                     const buyAlert =
 `⚡ *RAZOR BOT BUY CONFIRMED* ⚡\n\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
 `💰 *Buy Size:* \`${amount.toFixed(4)} SOL\`\n` +
 `🎯 *Mode:* ${modeDesc}\n` +
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`;
+`${links.footerButtons}`;
 
                     telegramService.sendAlert(buyAlert);
 
@@ -701,15 +817,16 @@ class TradeEngine {
                         wsService.watchToken(mint);
                     }
                 } else if(action === "sell") {
-                    let tokenData = this.tokenCache.get(mint);
+                    const tokenData = await this.resolveTokenMetadata(mint);
                     const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+                    const links = getTokenLinks(mint);
                     const sellAlert =
 `💸 *RAZOR BOT SELL CONFIRMED* 💸\n\n` +
-`🪙 *Token:* [${tokenName}](https://pump.fun/${mint})\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
 `🎯 *Trigger:* ${isReentry ? 'Dip Re-entry Take Profit' : 'Take Profit (2x) / Stop Loss Guard'}\n` +
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
-`📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint})`;
+`${links.footerButtons}`;
 
                     telegramService.sendAlert(sellAlert);
 
