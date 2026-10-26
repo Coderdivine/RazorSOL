@@ -210,69 +210,89 @@ class TradeEngine {
             return n === 'unknown' || n === 'unknown token' || s === 'unk' || n === 'solana token';
         };
 
-        // 1. In-memory cache
-        let cached = this.tokenCache.get(mint);
-        if (cached && !isInvalid(cached.name, cached.symbol)) {
-            let mc = cached.marketCapUSD || (cached.highestMCReached ? cached.highestMCReached * solanaService.getSolPriceUSD() : 0);
-            if (!mc && fallbackMcSol) mc = fallbackMcSol * solanaService.getSolPriceUSD();
-            return {
-                name: cached.name,
-                symbol: cached.symbol,
-                marketCapUSD: mc || 0
-            };
-        }
-
-        // 2. MongoDB TokenMetrics
-        try {
-            const dbToken = await TokenMetrics.findOne({ mint });
-            if (dbToken && !isInvalid(dbToken.name, dbToken.symbol)) {
-                let mc = (dbToken.highestMCReached || 0) * solanaService.getSolPriceUSD();
-                if (!mc && fallbackMcSol) mc = fallbackMcSol * solanaService.getSolPriceUSD();
-                const resolved = {
-                    name: dbToken.name,
-                    symbol: dbToken.symbol,
-                    marketCapUSD: mc || 0
-                };
-                this.tokenCache.set(mint, { ...(dbToken.toObject ? dbToken.toObject() : dbToken), ...resolved });
-                return resolved;
-            }
-        } catch (dbErr) {
-            // Non-blocking DB read error
-        }
-
+        // 1. Check in-memory cache for Name & Symbol
         let resolvedName = null;
         let resolvedSymbol = null;
-        let resolvedMC = fallbackMcSol ? (fallbackMcSol * solanaService.getSolPriceUSD()) : 0;
-
-        // 3. Query DexScreener (highest-priority for active Raydium/DEX tokens and pump tokens)
-        try {
-            const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 4000 });
-            if (res.data?.pairs?.length > 0) {
-                const sortedPairs = [...res.data.pairs].sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
-                for (const p of sortedPairs) {
-                    if (p.baseToken && p.baseToken.address === mint) {
-                        resolvedName = p.baseToken.name;
-                        resolvedSymbol = p.baseToken.symbol;
-                        resolvedMC = p.marketCap || p.fdv || resolvedMC;
-                        break;
-                    } else if (p.quoteToken && p.quoteToken.address === mint) {
-                        resolvedName = p.quoteToken.name;
-                        resolvedSymbol = p.quoteToken.symbol;
-                        resolvedMC = p.marketCap || p.fdv || resolvedMC;
-                        break;
-                    }
-                }
-                if (!resolvedName && sortedPairs[0]?.baseToken) {
-                    resolvedName = sortedPairs[0].baseToken.name;
-                    resolvedSymbol = sortedPairs[0].baseToken.symbol;
-                    resolvedMC = sortedPairs[0].marketCap || sortedPairs[0].fdv || resolvedMC;
-                }
-            }
-        } catch (dexErr) {
-            // DexScreener timeout
+        const cached = this.tokenCache.get(mint);
+        if (cached && !isInvalid(cached.name, cached.symbol)) {
+            resolvedName = cached.name;
+            resolvedSymbol = cached.symbol;
         }
 
-        // 4. On-chain Solana RPC (Token-2022 Extensions & Metaplex PDA)
+        // 2. Check MongoDB TokenMetrics for Name & Symbol if not in memory
+        if (isInvalid(resolvedName, resolvedSymbol)) {
+            try {
+                const dbToken = await TokenMetrics.findOne({ mint });
+                if (dbToken && !isInvalid(dbToken.name, dbToken.symbol)) {
+                    resolvedName = dbToken.name;
+                    resolvedSymbol = dbToken.symbol;
+                }
+            } catch (dbErr) {
+                // Non-blocking DB read error
+            }
+        }
+
+        // 3. Live Market Cap Resolution
+        // Always resolve live Market Cap from DexScreener / on-chain so alerts reflect real-time valuation, not stale entry
+        let liveMC = 0;
+        const now = Date.now();
+
+        // Use short 15-second cache for live MC to avoid hammering APIs on rapid sequential trades
+        if (cached && cached.liveMC_USD && (now - (cached.mcUpdatedAt || 0)) < 15000) {
+            liveMC = cached.liveMC_USD;
+        } else {
+            try {
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 3500 });
+                if (res.data?.pairs?.length > 0) {
+                    const sortedPairs = [...res.data.pairs].sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                    for (const p of sortedPairs) {
+                        if (p.baseToken && p.baseToken.address === mint) {
+                            if (isInvalid(resolvedName, resolvedSymbol)) {
+                                resolvedName = p.baseToken.name;
+                                resolvedSymbol = p.baseToken.symbol;
+                            }
+                            const candidateMC = p.marketCap || p.fdv || 0;
+                            if (candidateMC > 0) {
+                                liveMC = candidateMC;
+                                break;
+                            }
+                        } else if (p.quoteToken && p.quoteToken.address === mint) {
+                            if (isInvalid(resolvedName, resolvedSymbol)) {
+                                resolvedName = p.quoteToken.name;
+                                resolvedSymbol = p.quoteToken.symbol;
+                            }
+                            const candidateMC = p.marketCap || p.fdv || 0;
+                            if (candidateMC > 0) {
+                                liveMC = candidateMC;
+                                break;
+                            }
+                        }
+                    }
+                    if (liveMC === 0 && sortedPairs[0]) {
+                        const p0 = sortedPairs[0];
+                        if (isInvalid(resolvedName, resolvedSymbol) && p0.baseToken) {
+                            resolvedName = p0.baseToken.name;
+                            resolvedSymbol = p0.baseToken.symbol;
+                        }
+                        liveMC = p0.marketCap || p0.fdv || 0;
+                    }
+                }
+            } catch (dexErr) {
+                // DexScreener timeout or error
+            }
+        }
+
+        // 4. Fallback for Market Cap if DexScreener did not return a value
+        const solPrice = solanaService.getSolPriceUSD() || 150;
+        if (liveMC <= 0) {
+            if (fallbackMcSol && fallbackMcSol > 0) {
+                liveMC = fallbackMcSol * solPrice;
+            } else if (cached && cached.highestMCReached) {
+                liveMC = cached.highestMCReached * solPrice;
+            }
+        }
+
+        // 5. On-chain Solana RPC (Token-2022 Extensions & Metaplex PDA) if name/symbol still needed
         if (isInvalid(resolvedName, resolvedSymbol)) {
             try {
                 const onChain = await solanaService.fetchOnChainMetadata(mint);
@@ -292,22 +312,32 @@ class TradeEngine {
             mint,
             name: finalName,
             symbol: finalSymbol,
-            marketCapUSD: resolvedMC || 0
+            marketCapUSD: liveMC || 0,
+            liveMC_USD: liveMC || 0,
+            mcUpdatedAt: now
         };
 
         // Cache in memory
-        this.tokenCache.set(mint, tokenObj);
+        this.tokenCache.set(mint, {
+            ...(this.tokenCache.get(mint) || {}),
+            ...tokenObj
+        });
 
         // Upsert valid token in MongoDB
         if (!isInvalid(finalName, finalSymbol)) {
             try {
+                const currentMCSol = liveMC > 0 ? (liveMC / solPrice) : 0;
                 await TokenMetrics.findOneAndUpdate(
                     { mint },
                     {
-                        mint,
-                        name: finalName,
-                        symbol: finalSymbol,
-                        highestMCReached: resolvedMC > 0 ? (resolvedMC / (solanaService.getSolPriceUSD() || 150)) : 0
+                        $set: {
+                            mint,
+                            name: finalName,
+                            symbol: finalSymbol
+                        },
+                        $max: {
+                            highestMCReached: currentMCSol
+                        }
                     },
                     { upsert: true, new: true }
                 );

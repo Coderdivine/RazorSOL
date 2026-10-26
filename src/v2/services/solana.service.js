@@ -383,6 +383,24 @@ class SolanaService {
         return null;
     }
 
+    async getTokenSupplySafe(mint) {
+        if (!mint || typeof mint !== 'string') return 0;
+        if (!this.tokenSupplyCache) this.tokenSupplyCache = new Map();
+        if (this.tokenSupplyCache.has(mint)) return this.tokenSupplyCache.get(mint);
+
+        try {
+            const supplyRes = await this.connection.getTokenSupply(new PublicKey(mint));
+            const uiAmount = supplyRes?.value?.uiAmount || 0;
+            if (uiAmount > 0) {
+                this.tokenSupplyCache.set(mint, uiAmount);
+                return uiAmount;
+            }
+        } catch (e) {
+            // Non-blocking fallback
+        }
+        return 1_000_000_000; // Standard 1B supply for Solana launchpad tokens
+    }
+
     // Direct Solana Blockchain On-Chain Transaction Listener (Fallback & Dual-Engine)
     async watchWalletOnRPC(walletAddress, onTradeCallback) {
         if (this.activeRpcSubscriptions.has(walletAddress)) {
@@ -420,13 +438,27 @@ class SolanaService {
                         return;
                     }
 
+                    // Compute execution market cap based on on-chain token supply
+                    if (tradeEvent.tokenAmount > 0 && tradeEvent.solAmount > 0) {
+                        try {
+                            const supply = await this.getTokenSupplySafe(tradeEvent.mint);
+                            if (supply > 0) {
+                                const pricePerToken = tradeEvent.solAmount / tradeEvent.tokenAmount;
+                                tradeEvent.marketCapSol = pricePerToken * supply;
+                            }
+                        } catch (supErr) {
+                            // Non-blocking
+                        }
+                    }
+
                     console.log(`[SOLANA-RPC] ⚡ Active Whale Trade detected for ${walletAddress}! Sig: ${signature}`);
+                    const mcLog = tradeEvent.marketCapSol ? ` | MC: ${(tradeEvent.marketCapSol * this.getSolPriceUSD()).toFixed(0)} USD` : '';
                     if (tradeEvent.txType === 'buy') {
                         const usdDesc = tradeEvent.usdAmount ? ` (~$${tradeEvent.usdAmount.toFixed(2)} USD)` : '';
-                        console.log(`[SOLANA-RPC] 🎯 Whale BUY parsed on-chain! Mint: ${tradeEvent.mint} | Spent: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}`);
+                        console.log(`[SOLANA-RPC] 🎯 Whale BUY parsed on-chain! Mint: ${tradeEvent.mint} | Spent: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}${mcLog}`);
                     } else if (tradeEvent.txType === 'sell') {
                         const usdDesc = tradeEvent.usdAmount ? ` (~$${tradeEvent.usdAmount.toFixed(2)} USD)` : '';
-                        console.log(`[SOLANA-RPC] 📉 Whale SELL parsed on-chain! Mint: ${tradeEvent.mint} | Received: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}`);
+                        console.log(`[SOLANA-RPC] 📉 Whale SELL parsed on-chain! Mint: ${tradeEvent.mint} | Received: ${tradeEvent.solAmount.toFixed(4)} SOL${usdDesc}${mcLog}`);
                     }
 
                     if (typeof onTradeCallback === 'function') {
