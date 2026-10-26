@@ -370,13 +370,25 @@ class TradeEngine {
         }
 
         if (whalePos && whalePos.totalSolInvested > 0) {
-            const enteredSol = whalePos.totalSolInvested;
-            const enteredUsd = whalePos.totalUsdInvested || (enteredSol * solPrice);
+            const enteredTotalSol = whalePos.totalSolInvested;
+            const enteredTotalTokens = whalePos.totalTokensBought || 0;
+            const tokensSoldNow = tradeEvent.tokenAmount || 0;
 
-            const netSolGain = receivedSol - enteredSol;
-            const netUsdGain = receivedUsd - enteredUsd;
-            const roiPercent = ((receivedSol - enteredSol) / enteredSol) * 100;
-            const roiMultiplier = enteredSol > 0 ? (receivedSol / enteredSol) : 1;
+            // Determine proportion of position sold in this exit transaction
+            let sellRatio = 1.0;
+            if (enteredTotalTokens > 0 && tokensSoldNow > 0) {
+                sellRatio = Math.min(1.0, tokensSoldNow / enteredTotalTokens);
+            }
+
+            // Cost basis for the tokens sold in this exit
+            const costBasisSol = enteredTotalSol * sellRatio;
+            const costBasisUsd = (whalePos.totalUsdInvested || (enteredTotalSol * solPrice)) * sellRatio;
+
+            // Realized Profit / Loss
+            const netSolGain = receivedSol - costBasisSol;
+            const netUsdGain = receivedUsd - costBasisUsd;
+            const roiPercent = costBasisSol > 0 ? ((receivedSol - costBasisSol) / costBasisSol) * 100 : 0;
+            const roiMultiplier = costBasisSol > 0 ? (receivedSol / costBasisSol) : 1;
 
             const isProfit = netSolGain >= 0;
             const signEmoji = isProfit ? '🟢' : '🔴';
@@ -388,9 +400,9 @@ class TradeEngine {
             const minutes = Math.floor((durationMs % 3600000) / 60000);
             const holdingTimeDesc = hours > 0 ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
 
-            const enteredDesc = enteredUsd > 1
-                ? `${enteredSol.toFixed(4)} SOL (~$${enteredUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
-                : `${enteredSol.toFixed(4)} SOL`;
+            const enteredDesc = costBasisUsd > 1
+                ? `${costBasisSol.toFixed(4)} SOL (~$${costBasisUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+                : `${costBasisSol.toFixed(4)} SOL`;
 
             const gainSolDesc = `${gainSign}${netSolGain.toFixed(4)} SOL`;
             const gainUsdDesc = `${gainSign}$${Math.abs(netUsdGain).toLocaleString('en-US', { maximumFractionDigits: 2 })} USD`;
@@ -404,19 +416,21 @@ class TradeEngine {
 
             // Update database position stats
             try {
-                whalePos.totalTokensSold += (tradeEvent.tokenAmount || 0);
-                whalePos.totalSolRealized += receivedSol;
-                whalePos.totalUsdRealized += receivedUsd;
-                whalePos.netRealizedSolGain = whalePos.totalSolRealized - whalePos.totalSolInvested;
-                whalePos.netRealizedUsdGain = whalePos.totalUsdRealized - whalePos.totalUsdInvested;
-                whalePos.roiPercent = whalePos.totalSolInvested > 0
-                    ? ((whalePos.totalSolRealized - whalePos.totalSolInvested) / whalePos.totalSolInvested) * 100
-                    : 0;
+                whalePos.totalTokensSold = (whalePos.totalTokensSold || 0) + tokensSoldNow;
+                whalePos.totalSolRealized = (whalePos.totalSolRealized || 0) + receivedSol;
+                whalePos.totalUsdRealized = (whalePos.totalUsdRealized || 0) + receivedUsd;
+                whalePos.netRealizedSolGain = (whalePos.netRealizedSolGain || 0) + netSolGain;
+                whalePos.netRealizedUsdGain = (whalePos.netRealizedUsdGain || 0) + netUsdGain;
+                whalePos.roiPercent = costBasisSol > 0 ? ((whalePos.totalSolRealized - costBasisSol) / costBasisSol) * 100 : roiPercent;
                 whalePos.lastSellAt = new Date();
-                whalePos.sellCount += 1;
-                whalePos.isOpen = false; // Closed out on sell
+                whalePos.sellCount = (whalePos.sellCount || 0) + 1;
+
+                // Close position only if practically all tokens were sold (>90%)
+                const remaining = Math.max(0, (whalePos.totalTokensBought || 0) - whalePos.totalTokensSold);
+                whalePos.isOpen = (enteredTotalTokens > 0) ? (remaining / enteredTotalTokens > 0.10) : false;
+
                 await whalePos.save();
-                console.log(`[TRADE-ENGINE] 🏁 Recorded Whale Exit for ${watchedWallet.walletAddress} on ${tradeEvent.mint}: PnL=${gainSolDesc} (${roiDesc})`);
+                console.log(`[TRADE-ENGINE] 🏁 Recorded Whale Exit for ${watchedWallet.walletAddress} on ${tradeEvent.mint}: PnL=${gainSolDesc} (${roiDesc}) | Remaining open: ${whalePos.isOpen}`);
             } catch (saveErr) {
                 console.warn("[TRADE-ENGINE] ⚠️ Error updating WhalePosition on sell:", saveErr.message);
             }
@@ -458,19 +472,7 @@ class TradeEngine {
 
         const telegramService = require('./telegram.service');
 
-        // Admin Message (with FULL original details, whale Solscan link & address)
-        const adminAlertMsg =
-`📉 *Whale Sell Detected!* 📉\n\n` +
-`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
-`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
-`🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
-`${pnlSection}\n\n` +
-`📈 *Current MC:* ${mcTracker}\n\n` +
-`🗡️ *Razor Bot:* ${razorActionDesc}\n\n` +
-`${links.footerButtons}`;
-
-        // Group Message (whale address kept private, clean signals for members)
-        const groupAlertMsg =
+        const cleanAlertMsg =
 `📉 *Whale Sell Detected!* 📉\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
@@ -478,7 +480,7 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(adminAlertMsg, groupAlertMsg, tradeEvent.mint);
+        telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -652,25 +654,9 @@ class TradeEngine {
             console.warn("[TRADE-ENGINE] ⚠️ Error recording WhalePosition entry:", posErr.message);
         }
 
-        const botExecDesc = this.myBalance < 0.005
-            ? `🗡️ *Razor Bot Execution:*\nBuy Amount: \`0.0100 SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)\n⏸️ *Simulated / Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`
-            : `🗡️ *Razor Bot Execution:*\nBuy Amount: \`${myTradeSize.toFixed(4)} SOL\` (Scale: ${(scaleFactor*100).toFixed(2)}%)`;
-
         const telegramService = require('./telegram.service');
 
-        // Admin Message (with FULL original details, whale Solscan link & address)
-        const adminAlertMsg =
-`🚨 *Whale Buy Detected!* 🚨\n\n` +
-`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
-`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
-`🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
-`💰 *Whale Spent:* ${spentDesc}\n` +
-`📈 *Current MC:* ${mcTracker}\n` +
-`${botExecDesc}\n\n` +
-`${links.footerButtons}`;
-
-        // Group Message (whale address kept private, clean signals for members)
-        const groupAlertMsg =
+        const cleanAlertMsg =
 `🚨 *Whale Buy Detected!* 🚨\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
@@ -678,7 +664,7 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(adminAlertMsg, groupAlertMsg, tradeEvent.mint);
+        telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
 
         console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
