@@ -439,7 +439,10 @@ class TradeEngine {
 
         const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
-        const mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0);
+        let mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0);
+        if (mcUSD <= 0 && tradeEvent.mint.endsWith('pump')) {
+            mcUSD = 30000;
+        }
         const mcTracker = formatMarketCap(mcUSD);
         const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
@@ -447,6 +450,21 @@ class TradeEngine {
         const receivedSol = tradeEvent.solAmount || 0;
         const solPrice = solanaService.getSolPriceUSD();
         const receivedUsd = tradeEvent.usdAmount && tradeEvent.usdAmount > 1 ? tradeEvent.usdAmount : (receivedSol * solPrice);
+
+        // Noise Filter for Sells: If Razor bot holds an active position, ALWAYS process to mirror 100% sell-off.
+        // If Razor holds NO active position, filter out noise (avoid MC > $1M and dust sells < $100 USD).
+        const activeTradesCheck = await ActiveTrade.find({
+            mint: tradeEvent.mint,
+            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+        });
+        const holdsActiveTrade = activeTradesCheck && activeTradesCheck.length > 0;
+
+        if (!holdsActiveTrade) {
+            if (mcUSD > 1_000_000 || receivedUsd < 100) {
+                console.log(`[TRADE-ENGINE] 🔇 Noise Filter: Skipping whale sell alert for ${tradeEvent.mint} (No active position, received $${receivedUsd.toFixed(2)} / MC $${mcTracker}).`);
+                return;
+            }
+        }
 
         const receivedDesc = receivedUsd > 1
             ? `${receivedSol.toFixed(4)} SOL (~$${receivedUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
@@ -679,56 +697,91 @@ class TradeEngine {
             }
         }
 
-        // 1. ONE TRADE A DAY RULE: Enforce exactly 1 trade entry per calendar day UTC
-        const startOfDay = new Date();
-        startOfDay.setUTCHours(0, 0, 0, 0);
+        // Parse Whale Buy Volume & USD Value
+        const spentSol = tradeEvent.solAmount || 0;
+        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const spentUSD = tradeEvent.usdAmount && tradeEvent.usdAmount > 1 
+            ? tradeEvent.usdAmount 
+            : (spentSol * solPrice);
 
+        // FILTER 1: Noise Filter — Avoid "little amounts" (< $250 USD)
+        // User rule: "then if you see him buying little amount and $1m avoid it. also always check the amount he is buying if it's more than $250 under $500k, buy. let's keep it simple and filter out noise."
+        if (spentUSD < 250) {
+            console.log(`[TRADE-ENGINE] 🔇 Noise Filter: Whale spent only $${spentUSD.toFixed(2)} (< $250 min threshold) on ${tradeEvent.mint}. Filtered out noise.`);
+            return;
+        }
+
+        console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for ${tradeEvent.mint}...`);
+        const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
+        let mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solPrice : 0);
+        if (mcUSD <= 0 && tradeEvent.mint.endsWith('pump')) {
+            mcUSD = 30000; // Initial bonding curve range (~$4k - $69k)
+        }
+        const mcTracker = formatMarketCap(mcUSD);
+
+        // FILTER 2: Hard Ceiling — Avoid Market Cap above $1M ($1,000,000 USD)
+        // User rule: "Please avoid market cap above 1m as for us it's late. then if you see him buying little amount and $1m avoid it."
+        if (mcUSD > 1_000_000) {
+            console.log(`[TRADE-ENGINE] 🔇 Noise Filter: Token ${tradeEvent.mint} Market Cap is ${mcTracker} (> $1M ceiling). Avoided as it's too late.`);
+            return;
+        }
+
+        // EVALUATE COPY BUY CRITERIA
+        // Rule: "if it's more than $250 under $500k, buy."
         let canExecuteBuy = true;
         let skipReason = '';
 
-        // Check if an active position is currently open
-        const openTrade = await ActiveTrade.findOne({
-            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
-        });
-        if (openTrade) {
+        if (mcUSD >= 500_000) {
             canExecuteBuy = false;
-            skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)}`;
-            console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade (1 Trade/Day Limit).`);
-        } else {
-            // Check if a trade was already executed today
-            const tradesToday = await ActiveTrade.countDocuments({
-                createdAt: { $gte: startOfDay }
+            skipReason = `Market Cap (${mcTracker}) is above $500k buy zone (under $500k required)`;
+            console.log(`[TRADE-ENGINE] ℹ️ Token ${tradeEvent.mint} MC is ${mcTracker} (>= $500k). Skipping copy-buy.`);
+        }
+
+        // 1. ONE TRADE A DAY RULE: Enforce exactly 1 trade entry per calendar day UTC
+        if (canExecuteBuy) {
+            const startOfDay = new Date();
+            startOfDay.setUTCHours(0, 0, 0, 0);
+
+            // Check if an active position is currently open
+            const openTrade = await ActiveTrade.findOne({
+                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
             });
-            if (tradesToday >= 1) {
+            if (openTrade) {
                 canExecuteBuy = false;
-                skipReason = `Daily trade quota reached (1 trade already entered today UTC)`;
-                console.log(`[TRADE-ENGINE] 🛑 1 Trade/Day Limit reached (${tradesToday} trade entered today). Skipping new trade entry for ${tradeEvent.mint}.`);
+                skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)}`;
+                console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade (1 Trade/Day Limit).`);
+            } else {
+                // Check if a trade was already executed today
+                const tradesToday = await ActiveTrade.countDocuments({
+                    createdAt: { $gte: startOfDay }
+                });
+                if (tradesToday >= 1) {
+                    canExecuteBuy = false;
+                    skipReason = `Daily trade quota reached (1 trade already entered today UTC)`;
+                    console.log(`[TRADE-ENGINE] 🛑 1 Trade/Day Limit reached (${tradesToday} trade entered today). Skipping new trade entry for ${tradeEvent.mint}.`);
+                }
             }
         }
 
-        // 2. FULL ALLOCATION CALCULATION (Removed scale factor & 10% cap per user request)
+        // 2. FULL ALLOCATION CALCULATION (Spend full available liquid balance minus 0.003 SOL gas buffer)
         await this.updateMyBalance();
-        const gasReserveSol = 0.003; // Reserve 0.003 SOL for Solana network transaction fees
+        const gasReserveSol = 0.003;
         let myTradeSize = Math.max(0, this.myBalance - gasReserveSol);
 
         if (this.myBalance < 0.005 || myTradeSize < 0.005) {
             canExecuteBuy = false;
             skipReason = `Insufficient balance (${this.myBalance.toFixed(4)} SOL). Need ≥ 0.005 SOL.`;
-        } else {
-            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Entering with full available liquid balance: ${myTradeSize.toFixed(4)} SOL (Wallet: ${this.myBalance.toFixed(4)} SOL, Gas Reserve: ${gasReserveSol} SOL)`);
+        } else if (canExecuteBuy) {
+            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Ready to enter with ${myTradeSize.toFixed(4)} SOL (Wallet: ${this.myBalance.toFixed(4)} SOL, Gas Reserve: ${gasReserveSol} SOL)`);
         }
 
-        console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
-        const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
-        const mcUSD = tokenData.marketCapUSD || (tradeEvent.marketCapSol ? tradeEvent.marketCapSol * solanaService.getSolPriceUSD() : 0);
-        const mcTracker = formatMarketCap(mcUSD);
         const links = getTokenLinks(tradeEvent.mint);
         const shortWallet = `${watchedWallet.walletAddress.substring(0, 4)}...${watchedWallet.walletAddress.substring(watchedWallet.walletAddress.length - 4)}`;
         const whaleLabel = (watchedWallet.label && watchedWallet.label !== 'Whale Wallet') ? ` *(${watchedWallet.label})*` : '';
 
-        const spentDesc = tradeEvent.usdAmount && tradeEvent.usdAmount > 1
-            ? `${spentSol.toFixed(4)} SOL (~$${tradeEvent.usdAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
+        const spentDesc = spentUSD > 1
+            ? `${spentSol.toFixed(4)} SOL (~$${spentUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })} USD)`
             : `${spentSol.toFixed(4)} SOL`;
 
         // Track Whale Entry Position for PnL / Gain calculation upon exit
@@ -739,7 +792,7 @@ class TradeEngine {
                 isOpen: true
             });
 
-            const usdInvested = tradeEvent.usdAmount || (spentSol * solanaService.getSolPriceUSD());
+            const usdInvested = spentUSD;
 
             if (whalePos) {
                 whalePos.totalSolInvested += spentSol;
@@ -783,7 +836,7 @@ class TradeEngine {
         telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
 
         if (canExecuteBuy) {
-            console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution with full allocation: ${myTradeSize.toFixed(4)} SOL...`);
+            console.log(`[TRADE-ENGINE] 🎯 QUALIFIED BUY: Whale spent $${spentUSD.toFixed(0)} (> $250) under $500k MC (${mcTracker})! Entering full liquid balance: ${myTradeSize.toFixed(4)} SOL...`);
             await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
         } else {
             console.log(`[TRADE-ENGINE] ℹ️ Buy trade execution skipped: ${skipReason}`);
