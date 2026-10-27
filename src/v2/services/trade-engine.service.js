@@ -770,42 +770,31 @@ class TradeEngine {
             console.log(`[TRADE-ENGINE] ℹ️ Token ${tradeEvent.mint} MC is ${mcTracker} (>= $500k). Skipping copy-buy.`);
         }
 
-        // 1. ONE TRADE A DAY RULE: Enforce exactly 1 trade entry per calendar day UTC
+        // 1. SINGLE ACTIVE POSITION GATE: Only 1 trade open at a time.
+        // If an active position is open, wait until it closes before entering the next coin.
         if (canExecuteBuy) {
-            const startOfDay = new Date();
-            startOfDay.setUTCHours(0, 0, 0, 0);
-
-            // Check if an active position is currently open
             const openTrade = await ActiveTrade.findOne({
                 status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
             });
             if (openTrade) {
                 canExecuteBuy = false;
-                skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)}`;
-                console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade (1 Trade/Day Limit).`);
-            } else {
-                // Check if a trade was already executed today
-                const tradesToday = await ActiveTrade.countDocuments({
-                    createdAt: { $gte: startOfDay }
-                });
-                if (tradesToday >= 1) {
-                    canExecuteBuy = false;
-                    skipReason = `Daily trade quota reached (1 trade already entered today UTC)`;
-                    console.log(`[TRADE-ENGINE] 🛑 1 Trade/Day Limit reached (${tradesToday} trade entered today). Skipping new trade entry for ${tradeEvent.mint}.`);
-                }
+                skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)} (Single Trade Mode)`;
+                console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade until active position is exited.`);
             }
         }
 
-        // 2. FULL ALLOCATION CALCULATION (Spend full available liquid balance minus 0.003 SOL gas buffer)
+        // 2. AVAILABLE LIQUID BALANCE CHECK: Must have liquid balance > $1 USD (minus 0.003 SOL gas reserve)
+        // User rule: "if there's available balance greater than $1 we can be able to buy next coin that comes instead of using date stamp. This is really what I mean by one trade a day."
         await this.updateMyBalance();
         const gasReserveSol = 0.003;
         let myTradeSize = Math.max(0, this.myBalance - gasReserveSol);
+        const myTradeUsd = myTradeSize * solPrice;
 
-        if (this.myBalance < 0.005 || myTradeSize < 0.005) {
+        if (myTradeUsd < 1.0 || myTradeSize < 0.005) {
             canExecuteBuy = false;
-            skipReason = `Insufficient balance (${this.myBalance.toFixed(4)} SOL). Need ≥ 0.005 SOL.`;
+            skipReason = `Available balance ($${myTradeUsd.toFixed(2)} USD / ${this.myBalance.toFixed(4)} SOL) is below $1 minimum trade threshold.`;
         } else if (canExecuteBuy) {
-            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Ready to enter with ${myTradeSize.toFixed(4)} SOL (Wallet: ${this.myBalance.toFixed(4)} SOL, Gas Reserve: ${gasReserveSol} SOL)`);
+            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Entering next trade with full liquid balance: ${myTradeSize.toFixed(4)} SOL (~$${myTradeUsd.toFixed(2)} USD, Gas Reserve: ${gasReserveSol} SOL)`);
         }
 
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';

@@ -254,6 +254,44 @@ class TelegramService {
              this.handleStats(ctx, '1d');
         });
 
+        // Emergency Sell / Panic Command
+        this.bot.command(['sell', 'panic'], async (ctx) => {
+            console.log(`[TELEGRAM] 📥 Received /sell command from user: ${ctx.chat.id}`);
+            const tradeEngine = require('./trade-engine.service');
+            const openTrades = await ActiveTrade.find({
+                status: { $in: ['OPEN', 'PARTIAL_TP_1_4X', 'PARTIAL_TP_2X', 'REENTERED'] }
+            });
+            if (!openTrades || openTrades.length === 0) {
+                return ctx.reply('ℹ️ No active open positions found to sell.');
+            }
+            for (const trade of openTrades) {
+                const label = trade.tokenName || trade.mint.substring(0, 8);
+                const statusMsg = await ctx.reply(`🚨 *Manual Exit:* Selling 100% of *${label}* via Infura Paid RPC...`, { parse_mode: 'Markdown' });
+                const sig = await tradeEngine.executeTradeLocal(trade.mint, "sell", "100%", false, 0.0001, "MANUAL_PANIC", null, trade._id);
+                if (sig) {
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "MANUAL_PANIC";
+                    await trade.save();
+                    await ctx.telegram.editMessageText(
+                        ctx.chat.id,
+                        statusMsg.message_id,
+                        null,
+                        `✅ *Sold 100% of ${label}!*\n\n🔗 TX: [View on Solscan](https://solscan.io/tx/${sig})`,
+                        { parse_mode: 'Markdown', disable_web_page_preview: true }
+                    ).catch(() => {});
+                } else {
+                    await ctx.telegram.editMessageText(
+                        ctx.chat.id,
+                        statusMsg.message_id,
+                        null,
+                        `❌ *Failed to sell ${label}.* Check token balance on Solscan.`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(() => {});
+                }
+            }
+        });
+
         // Positions Command (with /trades alias)
         this.bot.command(['positions', 'trades', 'orders'], async (ctx) => {
             console.log(`[TELEGRAM] 📥 Received /positions command from user: ${ctx.chat.id}`);
@@ -661,6 +699,115 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await this.removeWalletFromWatch(ctx, wallet);
         });
 
+        // Interactive 1-Tap Sell 100% action
+        this.bot.action(/^action_sell_100:(.+)$/, async (ctx) => {
+            const mint = ctx.match[1];
+            await ctx.answerCbQuery('⚡ Executing 100% Sell...').catch(() => {});
+            const tradeEngine = require('./trade-engine.service');
+
+            const statusMsg = await ctx.reply(`⏳ *Executing 100% Sell for \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+
+            const activeTrade = await ActiveTrade.findOne({
+                mint,
+                status: { $in: ['OPEN', 'PARTIAL_TP_1_4X', 'PARTIAL_TP_2X', 'REENTERED'] }
+            });
+            const tradeId = activeTrade ? activeTrade._id : null;
+
+            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "MANUAL_TELEGRAM", null, tradeId);
+            if (sig) {
+                if (activeTrade) {
+                    activeTrade.status = "CLOSED";
+                    activeTrade.closedAt = new Date();
+                    activeTrade.closeReason = "MANUAL_TELEGRAM_100";
+                    await activeTrade.save();
+                }
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `✅ *Manual 100% Sell Confirmed!*\n\n` +
+                    `🪙 *Token:* \`${mint}\`\n` +
+                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    { parse_mode: 'Markdown', disable_web_page_preview: true }
+                ).catch(() => {});
+            } else {
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `❌ *Sell execution failed.* Check token balance or logs.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(() => {});
+            }
+        });
+
+        // Interactive 1-Tap Sell 50% action
+        this.bot.action(/^action_sell_50:(.+)$/, async (ctx) => {
+            const mint = ctx.match[1];
+            await ctx.answerCbQuery('⚡ Executing 50% Sell...').catch(() => {});
+            const tradeEngine = require('./trade-engine.service');
+
+            const statusMsg = await ctx.reply(`⏳ *Executing 50% Sell for \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+
+            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "50%", false, 0.0001, "MANUAL_TELEGRAM");
+            if (sig) {
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `✅ *Manual 50% Sell Confirmed!*\n\n` +
+                    `🪙 *Token:* \`${mint}\`\n` +
+                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    { parse_mode: 'Markdown', disable_web_page_preview: true }
+                ).catch(() => {});
+            } else {
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `❌ *Sell execution failed.* Check token balance or logs.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(() => {});
+            }
+        });
+
+        // Interactive 1-Tap Buy More action
+        this.bot.action(/^action_buy_more:(.+)$/, async (ctx) => {
+            const mint = ctx.match[1];
+            await ctx.answerCbQuery('⚡ Calculating balance & buying...').catch(() => {});
+            const tradeEngine = require('./trade-engine.service');
+
+            await tradeEngine.updateMyBalance();
+            const tradeAmount = Math.max(0, tradeEngine.myBalance - 0.003);
+
+            if (tradeAmount < 0.005) {
+                return ctx.reply(`⚠️ Insufficient balance to buy more (${tradeEngine.myBalance.toFixed(4)} SOL). Need ≥ 0.005 SOL.`);
+            }
+
+            const statusMsg = await ctx.reply(`⏳ *Buying \`${tradeAmount.toFixed(4)} SOL\` of \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            const sig = await tradeEngine.executeTradeLocal(mint, "buy", tradeAmount, true, 0.0001, "MANUAL_BUY_MORE");
+            if (sig) {
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `✅ *Manual Buy Confirmed!*\n\n` +
+                    `🪙 *Token:* \`${mint}\`\n` +
+                    `💰 *Amount:* \`${tradeAmount.toFixed(4)} SOL\`\n` +
+                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    { parse_mode: 'Markdown', disable_web_page_preview: true }
+                ).catch(() => {});
+            } else {
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    `❌ *Buy execution failed.* Check balance or logs.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(() => {});
+            }
+        });
+
         // Categorized Help Menus
         this.bot.action('help_cat_vip', async (ctx) => {
             await ctx.answerCbQuery().catch(() => {});
@@ -971,10 +1118,21 @@ Control automatic early token discovery (milestone sniper) and customize market 
 
             text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
-            const buttons = Markup.inlineKeyboard([
+            const keyboardRows = [];
+            if (openTrades.length > 0) {
+                for (const t of openTrades) {
+                    const label = (t.tokenName || t.mint.substring(0, 4)).slice(0, 10);
+                    keyboardRows.push([
+                        Markup.button.callback(`🔴 Sell 100% (${label})`, `action_sell_100:${t.mint}`),
+                        Markup.button.callback(`🟡 Sell 50%`, `action_sell_50:${t.mint}`)
+                    ]);
+                }
+            }
+            keyboardRows.push(
                 [Markup.button.callback('🔄 Refresh Positions', 'action_positions'), Markup.button.callback('📊 Performance Terminal', 'action_stats')],
                 [Markup.button.callback('🤖 Bot Profile', 'action_profile'), Markup.button.callback('💳 Bot Address', 'action_address')]
-            ]);
+            );
+            const buttons = Markup.inlineKeyboard(keyboardRows);
 
             if (ctx.callbackQuery && !ctx.callbackQuery.message?.photo) {
                 await ctx.editMessageText(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...buttons }).catch(async () => {
@@ -2016,9 +2174,26 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
             if (match) targetMint = match[1];
         }
 
-        let inlineMarkup = null;
+        let groupMarkup = null;
+        let adminMarkup = null;
+
         if (targetMint) {
-            inlineMarkup = Markup.inlineKeyboard([
+            // Group channel gets external links only (clean for subscribers)
+            groupMarkup = Markup.inlineKeyboard([
+                [
+                    Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
+                    Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`),
+                    Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`)
+                ]
+            ]).reply_markup;
+
+            // Admin private chat gets interactive 1-tap trade control buttons + links
+            adminMarkup = Markup.inlineKeyboard([
+                [
+                    Markup.button.callback('🔴 Sell 100%', `action_sell_100:${targetMint}`),
+                    Markup.button.callback('🟡 Sell 50%', `action_sell_50:${targetMint}`),
+                    Markup.button.callback('🟢 Buy More', `action_buy_more:${targetMint}`)
+                ],
                 [
                     Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
                     Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`),
@@ -2119,7 +2294,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             };
-            if (inlineMarkup) sendOpts.reply_markup = inlineMarkup;
+            if (adminMarkup) sendOpts.reply_markup = adminMarkup;
 
             try {
                 await this.bot.telegram.sendMessage(targetId, adminMsg, sendOpts);
@@ -2127,7 +2302,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = adminMsg.replace(/[*_`\[\]()]/g, '');
-                        const fallbackOpts = inlineMarkup ? { reply_markup: inlineMarkup } : {};
+                        const fallbackOpts = adminMarkup ? { reply_markup: adminMarkup } : {};
                         await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                     } catch {}
                 } else {
@@ -2142,7 +2317,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             };
-            if (inlineMarkup) sendOpts.reply_markup = inlineMarkup;
+            if (groupMarkup) sendOpts.reply_markup = groupMarkup;
 
             try {
                 await this.bot.telegram.sendMessage(targetId, groupMsg, sendOpts);
@@ -2150,7 +2325,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
-                        const fallbackOpts = inlineMarkup ? { reply_markup: inlineMarkup } : {};
+                        const fallbackOpts = groupMarkup ? { reply_markup: groupMarkup } : {};
                         await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                     } catch {}
                 } else {
