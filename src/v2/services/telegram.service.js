@@ -933,7 +933,7 @@ Control automatic early token discovery (milestone sniper) and customize market 
     async handlePositions(ctx) {
         try {
             const [openTrades, recentClosed] = await Promise.all([
-                ActiveTrade.find({ status: { $in: ['OPEN', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
+                ActiveTrade.find({ status: { $in: ['OPEN', 'PARTIAL_TP_2X', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
                 ActiveTrade.find({ status: 'CLOSED' }).sort({ updatedAt: -1 }).limit(5)
             ]);
 
@@ -946,12 +946,17 @@ Control automatic early token discovery (milestone sniper) and customize market 
                 text += `🟢 *Active Open Positions (${openTrades.length}):*\n`;
                 openTrades.forEach((t, i) => {
                     const shortMint = `${t.mint.substring(0, 6)}...${t.mint.substring(t.mint.length - 6)}`;
-                    const statusBadge = t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken • Watching Dip' : '⚡ Open');
+                    const statusBadge = t.status === 'PARTIAL_TP_2X' 
+                        ? '🎯 2x TP Taken (Holding 25% Moonbag)' 
+                        : (t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken' : '⚡ Open'));
+                    const entryDesc = t.entryMarketCapUSD > 0 
+                        ? `$${t.entryMarketCapUSD >= 1000 ? Math.round(t.entryMarketCapUSD / 1000) + 'k' : Math.round(t.entryMarketCapUSD)} MC`
+                        : `${t.entryMarketCap?.toFixed(2) || '0'} SOL MC`;
                     text += `${i + 1}. *${t.tokenName || 'Token'}* (\`${shortMint}\`)\n` +
                             `   • *Status:* ${statusBadge}\n` +
-                            `   • *Invested:* \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\`\n` +
-                            `   • *Source:* ${t.source === 'COPY_TRADE' ? '🎯 Whale Mirror' : '🔫 5K Milestone Snipe'}\n` +
-                            `   • *Links:* [Pump.fun](https://pump.fun/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
+                            `   • *Invested:* \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` (Entry: \`${entryDesc}\`)\n` +
+                            `   • *Rules:* 2x TP (Sell 75%) • Whale Sell (All) • -54% SL\n` +
+                            `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
                 });
             }
 
@@ -1177,13 +1182,13 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
 • *Min Order Size:* \`0.01 SOL\` (Fallback: \`5%\`)
 • *Slippage / Priority:* \`15%\` Slippage • Local Signing
 
-🔫 *Sniper & Risk Profile:*
+🔫 *Execution & Exit Rules:*
+• *Take Profit (2x):* \`2.0x (+100%)\` ➔ Sell \`75%\`, hold \`25%\` moonbag
+• *Whale Mirror Exit:* Whale sells ➔ Sell \`100% (ALL)\` immediately
+• *Stop Loss Guard:* \`-54%\` drop from entry ➔ Sell \`100%\` sell off
+• *Monitoring Loop:* Continuous 10-second active trade price monitor
 • *Early CA Discovery:* \`${earlyCAStatus}\`
 • *Watchlist Gate:* \`> ${watchlistGate}\` Market Cap
-• *Snipe Progression:* \`$10k ➔ $20k ➔ $50k\` MC
-• *Take Profit (TP):* \`2.0x (+100%)\` + \`50%\` Dip Re-entry
-• *Stop Loss (SL):* \`1.2x (-16.7%)\` Hard Protection
-• *DB Auto-Cleanup:* \`90 Days\` (3-Month TTL)
 
 📊 *Live State Summary:*
 • *Monitored Whales:* \`${watchedCount}\`

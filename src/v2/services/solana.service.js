@@ -57,6 +57,22 @@ class SolanaService {
         }
     }
 
+    async getTokenBalance(walletAddress, mint) {
+        if (!walletAddress || !mint) return 0;
+        try {
+            const pubKey = new PublicKey(walletAddress);
+            const mintKey = new PublicKey(mint);
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(pubKey, { mint: mintKey });
+            if (accounts?.value?.length > 0) {
+                const amount = accounts.value[0].account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0;
+                return amount;
+            }
+        } catch (err) {
+            // Non-blocking fallback
+        }
+        return 0;
+    }
+
     async sendTransactionSafe(tx, options = { maxRetries: 3 }) {
         // 1. Try Primary Public Connection
         try {

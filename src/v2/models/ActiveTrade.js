@@ -19,18 +19,31 @@ const ActiveTradeSchema = new Schema(
       type: Number,
       required: true,
     },
+    entryMarketCapUSD: {
+      type: Number,
+      default: 0,
+    },
     amountSolInvested: {
       type: Number,
       required: true,
     },
     tokensReceived: {
       type: Number,
-      required: true,
+      default: 0,
     },
     status: {
       type: String,
-      enum: ["OPEN", "TP_TAKEN_WAITING_REENTRY", "REENTERED", "CLOSED"],
+      enum: ["OPEN", "PARTIAL_TP_2X", "TP_TAKEN_WAITING_REENTRY", "REENTERED", "CLOSED"],
       default: "OPEN",
+    },
+    tp2xExecutedAt: {
+      type: Date,
+    },
+    closedAt: {
+      type: Date,
+    },
+    closeReason: {
+      type: String,
     },
     source: {
       type: String,

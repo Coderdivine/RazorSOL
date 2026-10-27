@@ -66,8 +66,18 @@ class TradeEngine {
         this.earlyCADiscoveryEnabled = false; // Disabled by default per user request
         this.watchlistThresholdUSD = 10000; // Increased to $10,000 USD per user request
         this.MILESTONES = [10000, 20000, 30000, 40000, 50000, 60000, 70000];
-        this.STOP_LOSS_FACTOR = 1.2; // 20% drop from entry
-        this.TAKE_PROFIT_FACTOR = 2.0; // 2x gain
+        this.STOP_LOSS_PERCENT = 54; // -54% drop from entry triggers 100% sell off
+        this.TAKE_PROFIT_FACTOR = 2.0; // 2x gain triggers 75% profit take, 25% moonbag held
+
+        // Continuous Active Trade TP/SL Monitor (Runs every 10 seconds)
+        // Ensures 2x (+100%) TP (sell 75%, hold 25%) and -54% SL (sell off 100%) are evaluated
+        setInterval(async () => {
+            try {
+                await this.pollActiveTradesForTPSL();
+            } catch (err) {
+                // Non-blocking
+            }
+        }, 10000);
     }
 
     async loadSettings() {
@@ -471,23 +481,27 @@ class TradeEngine {
 `🎯 *Whale Entry:* _Prior Entry (Purchased before tracker start)_`;
         }
 
-        // 2. Whale Sell Mirroring: If Razor Bot holds an active copy position for this token, close it!
+        // 2. Whale Sell Mirroring: If Razor Bot holds an active position for this token, sell ALL (100%)!
+        // "If the whale sell we sell all. Alll."
         let razorActionDesc = 'ℹ️ No Active Position';
         try {
-            const activeCopyTrade = await ActiveTrade.findOne({
+            const activeTrades = await ActiveTrade.find({
                 mint: tradeEvent.mint,
-                status: { $in: ["OPEN", "REENTERED"] },
-                source: "COPY_TRADE"
+                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
             });
 
-            if (activeCopyTrade) {
+            if (activeTrades && activeTrades.length > 0) {
                 await this.updateMyBalance();
-                if (this.myBalance >= 0.005) {
-                    console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Executing sell...`);
-                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, 0.0001, "COPY_TRADE", watchedWallet.walletAddress, activeCopyTrade._id);
+                if (this.myBalance >= 0.0005) {
+                    console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Whale sold. Selling ALL (100%) remaining bag...`);
+                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, 0.0001, "WHALE_MIRROR", watchedWallet.walletAddress);
                     if (sellSig) {
-                        activeCopyTrade.status = "CLOSED";
-                        await activeCopyTrade.save();
+                        for (let trade of activeTrades) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "WHALE_MIRROR";
+                            await trade.save();
+                        }
                         razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ [Solscan](https://solscan.io/tx/${sellSig}))`;
                     } else {
                         razorActionDesc = `⚠️ *Sell Attempted* (Broadcast pending)`;
@@ -631,6 +645,10 @@ class TradeEngine {
             console.log(`[TRADE-ENGINE] 🛡️ Safeguard: Adjusting trade size to minimum 0.01 SOL.`);
             myTradeSize = 0.01;
         }
+        // Protect wallet from spending gas buffer (reserve 0.003 SOL for network fees)
+        if (this.myBalance > 0.005) {
+            myTradeSize = Math.min(myTradeSize, this.myBalance - 0.003);
+        }
 
         console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
         const tokenData = await this.resolveTokenMetadata(tradeEvent.mint, tradeEvent.marketCapSol);
@@ -700,41 +718,85 @@ class TradeEngine {
         await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
     }
 
+    async pollActiveTradesForTPSL() {
+        try {
+            const activeTrades = await ActiveTrade.find({
+                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+            });
+            if (!activeTrades || activeTrades.length === 0) return;
+
+            const solPrice = solanaService.getSolPriceUSD() || 150;
+
+            for (const trade of activeTrades) {
+                try {
+                    const meta = await this.resolveTokenMetadata(trade.mint);
+                    if (meta && meta.marketCapUSD > 0) {
+                        const currentMC_Sol = meta.marketCapUSD / solPrice;
+                        await this.evaluateActiveTrades(trade.mint, currentMC_Sol);
+                    }
+                } catch (tradeErr) {
+                    // Non-blocking per-trade error
+                }
+            }
+        } catch (pollErr) {
+            // Non-blocking
+        }
+    }
+
     async evaluateActiveTrades(mint, currentMC) {
-        const activeTrades = await ActiveTrade.find({ mint, status: { $in: ["OPEN", "REENTERED"] } });
+        if (!mint || !currentMC || currentMC <= 0) return;
+
+        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const currentMC_USD = currentMC * solPrice;
+
+        const activeTrades = await ActiveTrade.find({
+            mint,
+            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+        });
         
-        for(let trade of activeTrades) {
-            if(trade.status === "OPEN") {
-                if(currentMC <= (trade.entryMarketCap / this.STOP_LOSS_FACTOR)) {
-                    console.log(`[TRADE-ENGINE] 🛑 Stop Loss Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Executing sell!`);
-                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
+        for (let trade of activeTrades) {
+            // Ensure entryMarketCap is valid
+            if (!trade.entryMarketCap || trade.entryMarketCap <= 0) {
+                if (trade.entryMarketCapUSD && trade.entryMarketCapUSD > 0) {
+                    trade.entryMarketCap = trade.entryMarketCapUSD / solPrice;
+                    await trade.save();
+                } else {
                     continue;
                 }
-                if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
-                    console.log(`[TRADE-ENGINE] 💸 Take Profit (2x) Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Securing profit!`);
-                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
-                    trade.status = "TP_TAKEN_WAITING_REENTRY";
+            }
+
+            const entryMC = trade.entryMarketCap; // in SOL
+            const ratio = currentMC / entryMC;
+            const pnlPercent = (ratio - 1.0) * 100;
+
+            // RULE 1: Stop Loss at -54% drop from entry -> SELL OFF 100%
+            // "If the coin goes down by -54% we sell off."
+            if (ratio <= 0.46 || pnlPercent <= -54) {
+                console.log(`[TRADE-ENGINE] 🛑 Stop Loss (-54%) Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${pnlPercent.toFixed(1)}%. Executing 100% SELL OFF!`);
+
+                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_54", null, trade._id);
+                if (sellSig) {
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "STOP_LOSS_54";
                     await trade.save();
                 }
-            } else if (trade.status === "REENTERED") {
-                 if(currentMC < trade.entryMarketCap) {
-                     console.log(`[TRADE-ENGINE] 🛑 Re-entry Stop Loss Triggered on ${mint} at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}. Executing sell!`);
-                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
-                 }
-                 else if(currentMC >= (trade.entryMarketCap * this.TAKE_PROFIT_FACTOR)) {
-                     console.log(`[TRADE-ENGINE] 💸 Re-entry Take Profit (2x) Triggered on ${mint}. Securing profit!`);
-                     await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, null, null, trade._id);
-                 }
+                continue;
             }
-        }
-        
-        const waitingTrades = await ActiveTrade.find({ mint, status: "TP_TAKEN_WAITING_REENTRY" });
-        for(let trade of waitingTrades) {
-             if(currentMC <= trade.entryMarketCap * 1.05) { 
-                 console.log(`[TRADE-ENGINE] 🦅 Dip detected on ${mint}. Re-entering with 50% initial capital at MC: $${(currentMC * solanaService.getSolPriceUSD()).toFixed(2)}`);
-                 const reEntryAmount = trade.amountSolInvested * 0.5;
-                 await this.executeTradeLocal(mint, "buy", reEntryAmount, true, 0.0001, "MILESTONE_SNIPE", null, trade._id, true);
-             }
+
+            // RULE 2: Take Profit at 2.0x gain -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
+            // "2x we sell of 75% the remaining will be there to capture remaining profit."
+            if (ratio >= 2.0 && trade.status === "OPEN") {
+                console.log(`[TRADE-ENGINE] 💸 2x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
+
+                const sellSig = await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_2X", null, trade._id);
+                if (sellSig) {
+                    trade.status = "PARTIAL_TP_2X";
+                    trade.tp2xExecutedAt = new Date();
+                    await trade.save();
+                }
+                continue;
+            }
         }
     }
 
@@ -749,9 +811,13 @@ class TradeEngine {
             console.log(`[TRADE-ENGINE] ℹ️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast for ${mint}.`);
             return null;
         }
+        if (action === "sell" && this.myBalance < 0.0005) {
+            console.log(`[TRADE-ENGINE] ℹ️ Insufficient balance for network gas fee (${this.myBalance.toFixed(4)} SOL). Skipping sell broadcast for ${mint}.`);
+            return null;
+        }
         
         try {
-            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} payload to PumpPortal for ${mint}`);
+            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} (${amount}) payload to PumpPortal for ${mint}`);
             const response = await axios.post("https://pumpportal.fun/api/trade-local", {
                 publicKey: this.myWalletKey,
                 action,
@@ -820,16 +886,23 @@ class TradeEngine {
                         await trade.save();
                         console.log(`[TRADE-ENGINE] 🔄 Updated trade state to REENTERED for DB record ${tradeId}`);
                     } else {
-                         await ActiveTrade.create({
+                        const solPrice = solanaService.getSolPriceUSD() || 150;
+                        const entryMcUsd = tokenData.marketCapUSD || 0;
+                        const entryMcSol = entryMcUsd > 0 ? (entryMcUsd / solPrice) : (this.tokenCache.get(mint)?.highestMCReached || 100);
+
+                        await ActiveTrade.create({
                             mint,
-                            entryPrice: 0,
-                            entryMarketCap: 0, 
+                            tokenName,
+                            entryPrice: entryMcUsd > 0 ? (entryMcUsd / 1_000_000_000) : 0,
+                            entryMarketCap: entryMcSol,
+                            entryMarketCapUSD: entryMcUsd,
                             amountSolInvested: amount,
                             tokensReceived: 0,
+                            status: "OPEN",
                             source,
                             mirroredWallet
                         });
-                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade record to DB for tracking TP/SL.`);
+                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 2x TP & -54% SL.`);
                         
                         const wsService = require('./pumpportal.service');
                         wsService.watchToken(mint);
@@ -838,11 +911,23 @@ class TradeEngine {
                     const tokenData = await this.resolveTokenMetadata(mint);
                     const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
                     const links = getTokenLinks(mint);
+
+                    let triggerDesc = 'Take Profit (2x) / Stop Loss Guard';
+                    if (source === 'TAKE_PROFIT_2X') {
+                        triggerDesc = '🎯 *2x Take Profit* (Sold 75%, holding 25% moonbag)';
+                    } else if (source === 'STOP_LOSS_54') {
+                        triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -54% drop)';
+                    } else if (source === 'WHALE_MIRROR' || source === 'COPY_TRADE') {
+                        triggerDesc = '🪞 *Mirrored Whale Exit* (Whale sold ➔ Sold 100%)';
+                    } else if (isReentry) {
+                        triggerDesc = '🦅 Dip Re-entry Take Profit';
+                    }
+
                     const sellAlert =
 `💸 *RAZOR BOT SELL CONFIRMED* 💸\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
-`🎯 *Trigger:* ${isReentry ? 'Dip Re-entry Take Profit' : 'Take Profit (2x) / Stop Loss Guard'}\n` +
+`🎯 *Trigger:* ${triggerDesc}\n` +
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
@@ -850,11 +935,11 @@ class TradeEngine {
 
                     if(tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
-                        if(trade.status !== "TP_TAKEN_WAITING_REENTRY") {
+                        if(trade && trade.status !== "PARTIAL_TP_2X" && trade.status !== "TP_TAKEN_WAITING_REENTRY") {
                             trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            await trade.save();
                         }
-                        await trade.save();
-                        console.log(`[TRADE-ENGINE] 💾 Updated ActiveTrade record status to ${trade.status}.`);
                     }
                 }
                 
