@@ -1954,6 +1954,55 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         }
     }
 
+    async sendAdminDirectMessage(text) {
+        if (!this.bot) return;
+        try {
+            let adminChatId = this.adminChatId || null;
+            if (!adminChatId) {
+                const settings = await BotSettings.findOne({ key: 'global' });
+                if (settings && settings.adminChatId) {
+                    adminChatId = String(settings.adminChatId);
+                }
+            }
+            if (!adminChatId) {
+                console.warn("[TELEGRAM] ⚠️ No adminChatId configured for direct admin alert.");
+                return;
+            }
+
+            // Deduplication: prevent sending identical messages within 60 seconds
+            if (!this.recentDirectAdminMessages) this.recentDirectAdminMessages = new Map();
+            const now = Date.now();
+            const lastSent = this.recentDirectAdminMessages.get(text);
+            if (lastSent && (now - lastSent) < 60000) {
+                console.log("[TELEGRAM] ℹ️ Suppressed duplicate direct admin message within 60s cooldown.");
+                return;
+            }
+            this.recentDirectAdminMessages.set(text, now);
+
+            // Cleanup map if large
+            if (this.recentDirectAdminMessages.size > 100) {
+                for (const [k, v] of this.recentDirectAdminMessages.entries()) {
+                    if (now - v > 60000) this.recentDirectAdminMessages.delete(k);
+                }
+            }
+
+            const sendOpts = {
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            };
+
+            await this.bot.telegram.sendMessage(adminChatId, text, sendOpts).catch(async (err) => {
+                console.warn("[TELEGRAM] ⚠️ Markdown parse failed for admin direct message, sending fallback plain text:", err.message);
+                const plainText = text.replace(/[*_`]/g, '');
+                await this.bot.telegram.sendMessage(adminChatId, plainText, { disable_web_page_preview: true });
+            });
+
+            console.log(`[TELEGRAM] ✉️ Direct admin notification sent strictly to admin private chat: ${adminChatId}`);
+        } catch (err) {
+            console.error("[TELEGRAM] ❌ Failed to send direct admin message:", err.message);
+        }
+    }
+
     async sendAlert(adminMessage, groupMessage = null, mint = null) {
         if (!this.bot) return;
 

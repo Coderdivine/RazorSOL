@@ -81,13 +81,27 @@ class TradeEngine {
 
         // Real-Time Wallet Deposit Listener (Instant sub-second detection on funding)
         this.lastNotifiedBalance = 0;
+        this.isDepositListenerReady = false;
+        this.isHandlingDeposit = false;
+        this.lastDepositAlertTime = 0;
         this.startWalletDepositListener();
     }
 
-    startWalletDepositListener() {
+    async startWalletDepositListener() {
         if (!this.myWalletKey) return;
         try {
             const pubkey = new PublicKey(this.myWalletKey);
+
+            // Pre-seed current on-chain balance immediately so server boots/restarts NEVER trigger a fake duplicate alert
+            try {
+                const currentBal = await solanaService.getSolBalance(this.myWalletKey);
+                this.myBalance = currentBal;
+                this.lastNotifiedBalance = currentBal;
+                this.isDepositListenerReady = true;
+                console.log(`[TRADE-ENGINE] 👁️ Real-time wallet funding listener attached to ${this.myWalletKey} (Starting Balance: ${currentBal.toFixed(4)} SOL)`);
+            } catch (initErr) {
+                this.isDepositListenerReady = true;
+            }
 
             // 1. WebSocket onAccountChange listener for instant sub-second detection
             this.connection.onAccountChange(pubkey, async (accountInfo) => {
@@ -104,44 +118,63 @@ class TradeEngine {
                     // Non-blocking
                 }
             }, 15000);
-
-            console.log(`[TRADE-ENGINE] 👁️ Real-time wallet funding listener attached to ${this.myWalletKey}`);
         } catch (err) {
             console.error(`[TRADE-ENGINE] ❌ Error attaching wallet deposit listener:`, err.message);
         }
     }
 
     async handleBalanceUpdate(newBalance, source = 'RPC') {
+        if (!this.isDepositListenerReady) return;
+        if (this.isHandlingDeposit) return;
+
         const prev = this.myBalance || 0;
+        const lastNotified = this.lastNotifiedBalance || 0;
+
+        // If balance has not increased by more than 0.001 SOL, simply update tracker
+        if (newBalance <= lastNotified + 0.001 || newBalance <= prev) {
+            this.myBalance = newBalance;
+            if (newBalance > lastNotified) this.lastNotifiedBalance = newBalance;
+            return;
+        }
+
+        // Debounce: prevent duplicate notification within 30 seconds
+        const now = Date.now();
+        if (now - this.lastDepositAlertTime < 30000) {
+            this.myBalance = newBalance;
+            this.lastNotifiedBalance = newBalance;
+            return;
+        }
+
+        // Lock mutex to prevent concurrent execution from WebSocket + Poller
+        this.isHandlingDeposit = true;
+        this.lastDepositAlertTime = now;
+        const deposited = newBalance - lastNotified;
+        this.lastNotifiedBalance = newBalance;
         this.myBalance = newBalance;
 
-        // Detect new incoming funds (> 0.001 SOL increase)
-        if (newBalance > (this.lastNotifiedBalance || 0) + 0.001 && newBalance > prev) {
-            const deposited = newBalance - (this.lastNotifiedBalance || 0);
-            this.lastNotifiedBalance = newBalance;
-            const solPrice = solanaService.getSolPriceUSD() || 150;
-            const usdVal = (newBalance * solPrice).toFixed(2);
-            const depUsd = (deposited * solPrice).toFixed(2);
+        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const usdVal = (newBalance * solPrice).toFixed(2);
+        const depUsd = (deposited * solPrice).toFixed(2);
 
-            console.log(`[TRADE-ENGINE] 🎉 DEPOSIT DETECTED via ${source}! Deposited: +${deposited.toFixed(4)} SOL (~$${depUsd}) | Total: ${newBalance.toFixed(4)} SOL (~$${usdVal})`);
+        console.log(`[TRADE-ENGINE] 🎉 DEPOSIT DETECTED via ${source}! Deposited: +${deposited.toFixed(4)} SOL (~$${depUsd}) | Total: ${newBalance.toFixed(4)} SOL (~$${usdVal})`);
 
-            try {
-                const telegramService = require('./telegram.service');
-                const depositAlert =
+        try {
+            const telegramService = require('./telegram.service');
+            const depositAlert =
 `💳 *WALLET FUNDING CONFIRMED!* 💳\n\n` +
 `🎉 Funds confirmed on Solana blockchain!\n` +
 `💰 *Deposit Detected:* \`+${deposited.toFixed(4)} SOL\` (~$${depUsd} USD)\n` +
 `💵 *Total Liquid Balance:* \`${newBalance.toFixed(4)} SOL\` (~$${usdVal} USD)\n` +
 `⚡ *Status:* 🟢 Armed & Ready for Trade\n` +
 `🎯 *Mode:* 1 Trade per Day (Full Allocation Mode)\n\n` +
-`_Razor is monitoring tracked whales and will enter the next trade fully!_`;
+`_Razor is monitoring tracked whales and will enter the next qualified trade fully!_`;
 
-                telegramService.sendAlert(depositAlert, depositAlert);
-            } catch (tErr) {
-                console.warn("[TRADE-ENGINE] ⚠️ Error sending deposit alert:", tErr.message);
-            }
-        } else if (newBalance !== prev) {
-            this.lastNotifiedBalance = newBalance;
+            // STRICTLY send to Admin's private bot chat ONLY (never to channels or groups)
+            await telegramService.sendAdminDirectMessage(depositAlert);
+        } catch (tErr) {
+            console.warn("[TRADE-ENGINE] ⚠️ Error sending deposit alert:", tErr.message);
+        } finally {
+            this.isHandlingDeposit = false;
         }
     }
 
