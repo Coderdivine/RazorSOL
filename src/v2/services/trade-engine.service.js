@@ -1019,15 +1019,39 @@ class TradeEngine {
                     } catch {}
                 }
 
-                console.log(`[TRADE-ENGINE] 📝 Received raw transaction from PumpPortal. Signing...`);
+                console.log(`[TRADE-ENGINE] 📝 Received raw transaction from PumpPortal. Refreshing blockhash & signing...`);
                 const txBytes = new Uint8Array(buffer);
                 const tx = VersionedTransaction.deserialize(txBytes);
+
+                // CRITICAL FIX: PumpPortal API caches and returns stale blockhashes that fail simulation with "Blockhash not found".
+                // We fetch a fresh, live blockhash directly from our RPC connection before signing.
+                try {
+                    let freshBlockhash = null;
+                    if (solanaService.infuraConnection) {
+                        const { blockhash } = await solanaService.infuraConnection.getLatestBlockhash('confirmed');
+                        freshBlockhash = blockhash;
+                    } else {
+                        const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
+                        freshBlockhash = blockhash;
+                    }
+                    if (freshBlockhash) {
+                        tx.message.recentBlockhash = freshBlockhash;
+                        console.log(`[TRADE-ENGINE] 🔄 Injected fresh on-chain blockhash: ${freshBlockhash.substring(0, 8)}...`);
+                    }
+                } catch (bhErr) {
+                    console.warn("[TRADE-ENGINE] ⚠️ Could not fetch fresh blockhash, falling back to original:", bhErr.message);
+                }
+
                 tx.sign([this.myKeypair]);
                 
-                console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network...`);
+                console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network via multi-RPC racing...`);
                 let signature;
                 try {
-                    signature = await solanaService.sendTransactionSafe(tx, { maxRetries: 3 });
+                    signature = await solanaService.sendTransactionSafe(tx, {
+                        skipPreflight: true,
+                        preflightCommitment: "confirmed",
+                        maxRetries: 5
+                    });
                     console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
                 } catch (sendErr) {
                     console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error across all endpoints:", sendErr.message);

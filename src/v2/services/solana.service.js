@@ -73,24 +73,44 @@ class SolanaService {
         return 0;
     }
 
-    async sendTransactionSafe(tx, options = { maxRetries: 3 }) {
-        // 1. Try Primary Public Connection
+    async sendTransactionSafe(tx, options = {}) {
+        const defaultOpts = {
+            skipPreflight: true,
+            preflightCommitment: "confirmed",
+            maxRetries: 5
+        };
+        const sendOpts = { ...defaultOpts, ...options };
+
+        // Dual-Engine Multi-RPC Racing: Broadcast to Infura Paid RPC & Primary RPC simultaneously
+        // Whichever validator gets it first will process it; duplicate submissions are deduplicated on-chain by signature.
+        const promises = [];
+
+        if (this.infuraConnection) {
+            promises.push(
+                this.infuraConnection.sendTransaction(tx, sendOpts).catch(err => {
+                    console.warn(`[SOLANA-RPC] ⚠️ Infura RPC sendTransaction notice: ${err.message}`);
+                    throw err;
+                })
+            );
+        }
+
+        if (this.connection) {
+            promises.push(
+                this.connection.sendTransaction(tx, sendOpts).catch(err => {
+                    console.warn(`[SOLANA-RPC] ⚠️ Primary RPC sendTransaction notice: ${err.message}`);
+                    throw err;
+                })
+            );
+        }
+
         try {
-            return await this.connection.sendTransaction(tx, options);
-        } catch (primaryErr) {
-            console.warn(`[SOLANA-RPC] ⚠️ Primary RPC sendTransaction failed (${primaryErr.message}). Trying secondary public RPC...`);
-            // 2. Try Secondary Public RPC
-            try {
-                const secConn = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
-                return await secConn.sendTransaction(tx, options);
-            } catch (secErr) {
-                // 3. Dynamic Failover: Infura Paid RPC
-                if (this.infuraConnection) {
-                    console.log(`[SOLANA-RPC] 🛡️ Public RPCs failed sendTransaction. Dynamic failover engaged: broadcasting via Infura paid RPC.`);
-                    return await this.infuraConnection.sendTransaction(tx, options);
-                }
-                throw secErr;
-            }
+            // Promise.any resolves as soon as ANY RPC endpoint accepts the transaction
+            const signature = await Promise.any(promises);
+            return signature;
+        } catch (multiErr) {
+            console.warn(`[SOLANA-RPC] ⚠️ Primary & Infura endpoints failed. Attempting fallback public RPC...`);
+            const secConn = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
+            return await secConn.sendTransaction(tx, sendOpts);
         }
     }
 

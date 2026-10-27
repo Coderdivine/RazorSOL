@@ -2088,7 +2088,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         const envAlertChannel = process.env.TELEGRAM_ALERTS_CHANNEL;
         const cfgAlertChannel = this.configuredAlertChannel;
 
-        if (envAlertChannel) {
+        if (envAlertChannel && String(envAlertChannel) !== '-1003985019043') {
             const id = String(envAlertChannel);
             if (vipChannelId && id === vipChannelId) {
                 groupTargets.add(id);
@@ -2097,7 +2097,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
             }
         }
 
-        if (cfgAlertChannel) {
+        if (cfgAlertChannel && String(cfgAlertChannel) !== '-1003985019043') {
             const id = String(cfgAlertChannel);
             if (vipChannelId && id === vipChannelId) {
                 groupTargets.add(id);
