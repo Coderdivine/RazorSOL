@@ -88,7 +88,7 @@ class PumpPortalService {
 
     async syncActiveTrades() {
         console.log("[PUMPPORTAL] 🔍 Syncing active trades for TP/SL monitoring...");
-        const activeTrades = await ActiveTrade.find({ status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] } });
+        const activeTrades = await ActiveTrade.find({ status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] } });
         if (activeTrades.length > 0) {
             const keys = activeTrades.map(t => t.mint);
             this.ws.send(JSON.stringify({

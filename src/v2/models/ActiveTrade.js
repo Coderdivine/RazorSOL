@@ -33,8 +33,11 @@ const ActiveTradeSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["OPEN", "PARTIAL_TP_2X", "TP_TAKEN_WAITING_REENTRY", "REENTERED", "CLOSED"],
+      enum: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "TP_TAKEN_WAITING_REENTRY", "REENTERED", "CLOSED"],
       default: "OPEN",
+    },
+    tp14xExecutedAt: {
+      type: Date,
     },
     tp2xExecutedAt: {
       type: Date,

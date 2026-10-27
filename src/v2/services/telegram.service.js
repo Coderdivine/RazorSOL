@@ -689,7 +689,7 @@ Monitor high-conviction Solana whale wallets. Whenever they buy or sell, Razor d
             const text =
 `💼 *POSITIONS & PERFORMANCE TERMINAL*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Track open meme coin positions, automatic profit-taking (2x rules), stop-loss exits, and view the live PnL chart.
+Track open meme coin positions, automatic profit-taking (1.4x rules), stop-loss exits, and view the live PnL chart.
 
 *Tap any command button below to execute:*`;
             await this.safeEditOrReply(ctx, text, this.getTradingHelpButtons());
@@ -933,7 +933,7 @@ Control automatic early token discovery (milestone sniper) and customize market 
     async handlePositions(ctx) {
         try {
             const [openTrades, recentClosed] = await Promise.all([
-                ActiveTrade.find({ status: { $in: ['OPEN', 'PARTIAL_TP_2X', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
+                ActiveTrade.find({ status: { $in: ['OPEN', 'PARTIAL_TP_1_4X', 'PARTIAL_TP_2X', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
                 ActiveTrade.find({ status: 'CLOSED' }).sort({ updatedAt: -1 }).limit(5)
             ]);
 
@@ -946,8 +946,8 @@ Control automatic early token discovery (milestone sniper) and customize market 
                 text += `🟢 *Active Open Positions (${openTrades.length}):*\n`;
                 openTrades.forEach((t, i) => {
                     const shortMint = `${t.mint.substring(0, 6)}...${t.mint.substring(t.mint.length - 6)}`;
-                    const statusBadge = t.status === 'PARTIAL_TP_2X' 
-                        ? '🎯 2x TP Taken (Holding 25% Moonbag)' 
+                    const statusBadge = (t.status === 'PARTIAL_TP_1_4X' || t.status === 'PARTIAL_TP_2X')
+                        ? '🎯 1.4x TP Taken (Holding 25% Moonbag)' 
                         : (t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken' : '⚡ Open'));
                     const entryDesc = t.entryMarketCapUSD > 0 
                         ? `$${t.entryMarketCapUSD >= 1000 ? Math.round(t.entryMarketCapUSD / 1000) + 'k' : Math.round(t.entryMarketCapUSD)} MC`
@@ -955,7 +955,7 @@ Control automatic early token discovery (milestone sniper) and customize market 
                     text += `${i + 1}. *${t.tokenName || 'Token'}* (\`${shortMint}\`)\n` +
                             `   • *Status:* ${statusBadge}\n` +
                             `   • *Invested:* \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` (Entry: \`${entryDesc}\`)\n` +
-                            `   • *Rules:* 2x TP (Sell 75%) • Whale Sell (All) • -54% SL\n` +
+                            `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -54% SL\n` +
                             `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
                 });
             }
@@ -1180,10 +1180,10 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
 • *Sizing Model:* Proportional Whale Gain Factor
 • *Max Risk Cap:* \`10%\` of Portfolio per Trade
 • *Min Order Size:* \`0.01 SOL\` (Fallback: \`5%\`)
-• *Slippage / Priority:* \`15%\` Slippage • Local Signing
+• *Slippage / Priority:* \`25%\` Slippage • Local Signing
 
 🔫 *Execution & Exit Rules:*
-• *Take Profit (2x):* \`2.0x (+100%)\` ➔ Sell \`75%\`, hold \`25%\` moonbag
+• *Take Profit (1.4x):* \`1.4x (+40%)\` ➔ Sell \`75%\`, hold \`25%\` moonbag
 • *Whale Mirror Exit:* Whale sells ➔ Sell \`100% (ALL)\` immediately
 • *Stop Loss Guard:* \`-54%\` drop from entry ➔ Sell \`100%\` sell off
 • *Monitoring Loop:* Continuous 10-second active trade price monitor

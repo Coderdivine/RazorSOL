@@ -11,17 +11,14 @@ const BASE_MINTS = new Set([
 
 class SolanaService {
     constructor() {
-        this.rpcUrl = SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-        this.connection = new Connection(this.rpcUrl, 'confirmed');
-
-        // Dynamic Emergency Fallback: Infura Paid RPC (Only invoked if public RPC fails)
+        // Use Infura Paid RPC as primary connection whenever configured
         const infuraKey = INFURA_API_KEY || (INFURA_SOLANA_RPC_URL ? INFURA_SOLANA_RPC_URL.split('/').pop() : '');
         this.infuraRpcUrl = INFURA_SOLANA_RPC_URL || (infuraKey ? `https://solana-mainnet.infura.io/v3/${infuraKey}` : null);
-        this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, 'confirmed') : null;
+        this.rpcUrl = this.infuraRpcUrl || SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+        this.connection = new Connection(this.rpcUrl, 'confirmed');
+        this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, 'confirmed') : this.connection;
 
-        if (this.infuraRpcUrl) {
-            console.log(`[SOLANA-RPC] 🛡️ Dynamic failover standby active: Infura Paid RPC configured.`);
-        }
+        console.log(`[SOLANA-RPC] ⚡ Primary Solana RPC active: ${this.infuraRpcUrl ? 'Infura Paid High-Performance RPC' : this.rpcUrl}`);
 
         this.cachedSolPrice = 150;
         this.activeRpcSubscriptions = new Map();

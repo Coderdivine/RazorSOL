@@ -488,7 +488,7 @@ class TradeEngine {
         // If Razor holds NO active position, filter out noise (avoid MC > $1M and dust sells < $100 USD).
         const activeTradesCheck = await ActiveTrade.find({
             mint: tradeEvent.mint,
-            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+            status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
         });
         const holdsActiveTrade = activeTradesCheck && activeTradesCheck.length > 0;
 
@@ -603,7 +603,7 @@ class TradeEngine {
         try {
             const activeTrades = await ActiveTrade.find({
                 mint: tradeEvent.mint,
-                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+                status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
             });
 
             if (activeTrades && activeTrades.length > 0) {
@@ -777,7 +777,7 @@ class TradeEngine {
 
             // Check if an active position is currently open
             const openTrade = await ActiveTrade.findOne({
-                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+                status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
             });
             if (openTrade) {
                 canExecuteBuy = false;
@@ -879,7 +879,7 @@ class TradeEngine {
     async pollActiveTradesForTPSL() {
         try {
             const activeTrades = await ActiveTrade.find({
-                status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+                status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
             });
             if (!activeTrades || activeTrades.length === 0) return;
 
@@ -926,7 +926,7 @@ class TradeEngine {
 
         const activeTrades = await ActiveTrade.find({
             mint,
-            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+            status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
         });
         
         for (let trade of activeTrades) {
@@ -959,15 +959,15 @@ class TradeEngine {
                 continue;
             }
 
-            // RULE 2: Take Profit at 2.0x gain -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
-            // "2x we sell of 75% the remaining will be there to capture remaining profit."
-            if (ratio >= 2.0 && trade.status === "OPEN") {
-                console.log(`[TRADE-ENGINE] 💸 2x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
+            // RULE 2: Take Profit at 1.4x gain -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
+            // "Instead of 2x at the first buy let us use 1.4x for now."
+            if (ratio >= 1.4 && trade.status === "OPEN") {
+                console.log(`[TRADE-ENGINE] 💸 1.4x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_2X", null, trade._id);
+                const sellSig = await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_1_4X", null, trade._id);
                 if (sellSig) {
-                    trade.status = "PARTIAL_TP_2X";
-                    trade.tp2xExecutedAt = new Date();
+                    trade.status = "PARTIAL_TP_1_4X";
+                    trade.tp14xExecutedAt = new Date();
                     await trade.save();
                 }
                 continue;
@@ -999,7 +999,7 @@ class TradeEngine {
                 mint,
                 amount,
                 denominatedInSol: denominatedInSol ? "true" : "false",
-                slippage: 15,
+                slippage: 25,
                 priorityFee,
                 pool: "auto"
             }, {
@@ -1134,7 +1134,7 @@ class TradeEngine {
 
                     if(tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
-                        if(trade && trade.status !== "PARTIAL_TP_2X" && trade.status !== "TP_TAKEN_WAITING_REENTRY") {
+                        if(trade && trade.status !== "PARTIAL_TP_1_4X" && trade.status !== "PARTIAL_TP_2X" && trade.status !== "TP_TAKEN_WAITING_REENTRY") {
                             trade.status = "CLOSED";
                             trade.closedAt = new Date();
                             await trade.save();
