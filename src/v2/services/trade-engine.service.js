@@ -1,6 +1,6 @@
 const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58');
-const { VersionedTransaction, Keypair, Connection } = require('@solana/web3.js');
+const { VersionedTransaction, Keypair, Connection, PublicKey } = require('@solana/web3.js');
 const solanaService = require('./solana.service');
 const WatchedWallet = require('../models/WatchedWallet');
 const TokenMetrics = require('../models/TokenMetrics');
@@ -78,6 +78,71 @@ class TradeEngine {
                 // Non-blocking
             }
         }, 10000);
+
+        // Real-Time Wallet Deposit Listener (Instant sub-second detection on funding)
+        this.lastNotifiedBalance = 0;
+        this.startWalletDepositListener();
+    }
+
+    startWalletDepositListener() {
+        if (!this.myWalletKey) return;
+        try {
+            const pubkey = new PublicKey(this.myWalletKey);
+
+            // 1. WebSocket onAccountChange listener for instant sub-second detection
+            this.connection.onAccountChange(pubkey, async (accountInfo) => {
+                const newBalance = accountInfo.lamports / 1e9;
+                await this.handleBalanceUpdate(newBalance, 'Instant RPC WebSocket');
+            }, 'confirmed');
+
+            // 2. Periodic polling every 15 seconds as failover
+            setInterval(async () => {
+                try {
+                    const bal = await solanaService.getSolBalance(this.myWalletKey);
+                    await this.handleBalanceUpdate(bal, 'Periodic Poller');
+                } catch (e) {
+                    // Non-blocking
+                }
+            }, 15000);
+
+            console.log(`[TRADE-ENGINE] 👁️ Real-time wallet funding listener attached to ${this.myWalletKey}`);
+        } catch (err) {
+            console.error(`[TRADE-ENGINE] ❌ Error attaching wallet deposit listener:`, err.message);
+        }
+    }
+
+    async handleBalanceUpdate(newBalance, source = 'RPC') {
+        const prev = this.myBalance || 0;
+        this.myBalance = newBalance;
+
+        // Detect new incoming funds (> 0.001 SOL increase)
+        if (newBalance > (this.lastNotifiedBalance || 0) + 0.001 && newBalance > prev) {
+            const deposited = newBalance - (this.lastNotifiedBalance || 0);
+            this.lastNotifiedBalance = newBalance;
+            const solPrice = solanaService.getSolPriceUSD() || 150;
+            const usdVal = (newBalance * solPrice).toFixed(2);
+            const depUsd = (deposited * solPrice).toFixed(2);
+
+            console.log(`[TRADE-ENGINE] 🎉 DEPOSIT DETECTED via ${source}! Deposited: +${deposited.toFixed(4)} SOL (~$${depUsd}) | Total: ${newBalance.toFixed(4)} SOL (~$${usdVal})`);
+
+            try {
+                const telegramService = require('./telegram.service');
+                const depositAlert =
+`💳 *WALLET FUNDING CONFIRMED!* 💳\n\n` +
+`🎉 Funds confirmed on Solana blockchain!\n` +
+`💰 *Deposit Detected:* \`+${deposited.toFixed(4)} SOL\` (~$${depUsd} USD)\n` +
+`💵 *Total Liquid Balance:* \`${newBalance.toFixed(4)} SOL\` (~$${usdVal} USD)\n` +
+`⚡ *Status:* 🟢 Armed & Ready for Trade\n` +
+`🎯 *Mode:* 1 Trade per Day (Full Allocation Mode)\n\n` +
+`_Razor is monitoring tracked whales and will enter the next trade fully!_`;
+
+                telegramService.sendAlert(depositAlert, depositAlert);
+            } catch (tErr) {
+                console.warn("[TRADE-ENGINE] ⚠️ Error sending deposit alert:", tErr.message);
+            }
+        } else if (newBalance !== prev) {
+            this.lastNotifiedBalance = newBalance;
+        }
     }
 
     async loadSettings() {
@@ -614,40 +679,43 @@ class TradeEngine {
             }
         }
 
-        console.log(`[TRADE-ENGINE] 🧮 Calculating Scale Factor for ${watchedWallet.walletAddress}...`);
-        const targetWalletBalance = tradeEvent.traderBalanceSol || await solanaService.getSolBalance(watchedWallet.walletAddress);
-        const spentSol = tradeEvent.solAmount;
-        
-        await this.updateMyBalance();
-        let myTradeSize = 0;
-        let scaleFactor = 0;
-        
-        if (!targetWalletBalance || targetWalletBalance <= 0) {
-            console.log(`[TRADE-ENGINE] ⚠️ [FALLBACK] RPC failed to fetch balance for ${watchedWallet.walletAddress}. Using default 5% allocation.`);
-            myTradeSize = this.myBalance * 0.05; 
-        } else if (!spentSol) {
-            console.log(`[TRADE-ENGINE] ℹ️ No SOL spent parsed from event. Skipping copy trade.`);
-            return;
+        // 1. ONE TRADE A DAY RULE: Enforce exactly 1 trade entry per calendar day UTC
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0, 0, 0, 0);
+
+        let canExecuteBuy = true;
+        let skipReason = '';
+
+        // Check if an active position is currently open
+        const openTrade = await ActiveTrade.findOne({
+            status: { $in: ["OPEN", "PARTIAL_TP_2X", "REENTERED"] }
+        });
+        if (openTrade) {
+            canExecuteBuy = false;
+            skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)}`;
+            console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade (1 Trade/Day Limit).`);
         } else {
-            // Normalize scale factor against realistic portfolio floor (prevents 100% on dust trades)
-            const effectivePortfolio = Math.max(targetWalletBalance, 5.0);
-            scaleFactor = Math.min(1.0, Math.max(0.0001, spentSol / effectivePortfolio));
-            myTradeSize = this.myBalance * scaleFactor;
-            console.log(`[TRADE-ENGINE] ⚖️ Scale Factor: ${(scaleFactor*100).toFixed(2)}% (Bal: ${targetWalletBalance.toFixed(4)}, Effective: ${effectivePortfolio.toFixed(2)}) | Calculated Trade: ${myTradeSize} SOL`);
+            // Check if a trade was already executed today
+            const tradesToday = await ActiveTrade.countDocuments({
+                createdAt: { $gte: startOfDay }
+            });
+            if (tradesToday >= 1) {
+                canExecuteBuy = false;
+                skipReason = `Daily trade quota reached (1 trade already entered today UTC)`;
+                console.log(`[TRADE-ENGINE] 🛑 1 Trade/Day Limit reached (${tradesToday} trade entered today). Skipping new trade entry for ${tradeEvent.mint}.`);
+            }
         }
-        
-        // Safeguards
-        if(myTradeSize > this.myBalance * 0.1) {
-            console.log(`[TRADE-ENGINE] 🛡️ Safeguard: Capping trade size to 10% of portfolio.`);
-            myTradeSize = this.myBalance * 0.1; 
-        }
-        if(myTradeSize < 0.01) {
-            console.log(`[TRADE-ENGINE] 🛡️ Safeguard: Adjusting trade size to minimum 0.01 SOL.`);
-            myTradeSize = 0.01;
-        }
-        // Protect wallet from spending gas buffer (reserve 0.003 SOL for network fees)
-        if (this.myBalance > 0.005) {
-            myTradeSize = Math.min(myTradeSize, this.myBalance - 0.003);
+
+        // 2. FULL ALLOCATION CALCULATION (Removed scale factor & 10% cap per user request)
+        await this.updateMyBalance();
+        const gasReserveSol = 0.003; // Reserve 0.003 SOL for Solana network transaction fees
+        let myTradeSize = Math.max(0, this.myBalance - gasReserveSol);
+
+        if (this.myBalance < 0.005 || myTradeSize < 0.005) {
+            canExecuteBuy = false;
+            skipReason = `Insufficient balance (${this.myBalance.toFixed(4)} SOL). Need ≥ 0.005 SOL.`;
+        } else {
+            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Entering with full available liquid balance: ${myTradeSize.toFixed(4)} SOL (Wallet: ${this.myBalance.toFixed(4)} SOL, Gas Reserve: ${gasReserveSol} SOL)`);
         }
 
         console.log(`[TRADE-ENGINE] 📊 Fetching Token Metrics for alert formatting...`);
@@ -714,8 +782,12 @@ class TradeEngine {
 
         telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
 
-        console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution...`);
-        await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
+        if (canExecuteBuy) {
+            console.log(`[TRADE-ENGINE] 🚀 Dispatching local buy trade execution with full allocation: ${myTradeSize.toFixed(4)} SOL...`);
+            await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
+        } else {
+            console.log(`[TRADE-ENGINE] ℹ️ Buy trade execution skipped: ${skipReason}`);
+        }
     }
 
     async pollActiveTradesForTPSL() {
