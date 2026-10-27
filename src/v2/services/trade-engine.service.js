@@ -31,7 +31,8 @@ function getTokenLinks(mint) {
         dexUrl: `https://dexscreener.com/solana/${mint}`,
         pumpUrl: `https://pump.fun/${mint}`,
         solscanUrl: `https://solscan.io/token/${mint}`,
-        footerButtons: `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint}) | 🔎 [Solscan](https://solscan.io/token/${mint})`
+        gmgnUrl: `https://gmgn.ai/sol/token/${mint}`,
+        footerButtons: `📊 [DexScreener](https://dexscreener.com/solana/${mint}) | 💊 [Pump.fun](https://pump.fun/${mint}) | 🔎 [Solscan](https://solscan.io/token/${mint}) | ⚡ [GMGN](https://gmgn.ai/sol/token/${mint})`
     };
 }
 
@@ -303,6 +304,40 @@ class TradeEngine {
         // 3. Evaluate if we have an active position (TP/SL)
         if(mint && mc) {
             await this.evaluateActiveTrades(mint, mc);
+        }
+    }
+
+    async checkTokenSecurity(mint) {
+        if (!mint || typeof mint !== 'string') {
+            return { isSafe: true };
+        }
+        // Pump.fun tokens natively have mint & freeze authorities revoked by contract
+        if (mint.endsWith('pump')) {
+            return { isSafe: true, freezeAuthority: null, mintAuthority: null };
+        }
+        try {
+            const pubkey = new PublicKey(mint);
+            const conn = solanaService.infuraConnection || this.connection;
+            const acc = await conn.getParsedAccountInfo(pubkey);
+            const info = acc?.value?.data?.parsed?.info;
+            if (!info) {
+                return { isSafe: true, freezeAuthority: null, mintAuthority: null };
+            }
+
+            // Freeze Authority Guard: If active, dev can freeze buyer token accounts!
+            if (info.freezeAuthority) {
+                return {
+                    isSafe: false,
+                    reason: `Active freezeAuthority (${info.freezeAuthority}) — Creator can freeze selling!`,
+                    freezeAuthority: info.freezeAuthority,
+                    mintAuthority: info.mintAuthority
+                };
+            }
+
+            return { isSafe: true, freezeAuthority: null, mintAuthority: info.mintAuthority };
+        } catch (err) {
+            console.warn(`[TRADE-ENGINE] ⚠️ Security check notice for ${mint}:`, err.message);
+            return { isSafe: true };
         }
     }
 
@@ -783,7 +818,17 @@ class TradeEngine {
             }
         }
 
-        // 2. AVAILABLE LIQUID BALANCE CHECK: Must have liquid balance > $1 USD (minus 0.003 SOL gas reserve)
+        // 2. HONEYPOT & FREEZE AUTHORITY GUARD: Pre-buy security check via Infura Paid RPC
+        if (canExecuteBuy) {
+            const security = await this.checkTokenSecurity(tradeEvent.mint);
+            if (!security.isSafe) {
+                canExecuteBuy = false;
+                skipReason = `Honeypot Guard: ${security.reason}`;
+                console.log(`[TRADE-ENGINE] 🛑 HONEYPOT BLOCKED on ${tradeEvent.mint}! ${security.reason}`);
+            }
+        }
+
+        // 3. AVAILABLE LIQUID BALANCE CHECK: Must have liquid balance > $1 USD (minus 0.003 SOL gas reserve)
         // User rule: "if there's available balance greater than $1 we can be able to buy next coin that comes instead of using date stamp. This is really what I mean by one trade a day."
         await this.updateMyBalance();
         const gasReserveSol = 0.003;
@@ -957,9 +1002,38 @@ class TradeEngine {
                 if (sellSig) {
                     trade.status = "PARTIAL_TP_1_4X";
                     trade.tp14xExecutedAt = new Date();
+                    trade.highestMarketCapPostTP = currentMC;
                     await trade.save();
                 }
                 continue;
+            }
+
+            // RULE 3: Trailing Stop on the 25% Moonbag (-20% from post-TP peak)
+            // Once 1.4x TP is taken (75% sold), dynamically track highest MC post-TP and sell remaining 25% if MC drops 20% from peak
+            if (trade.status === "PARTIAL_TP_1_4X" || trade.status === "PARTIAL_TP_2X") {
+                if (!trade.highestMarketCapPostTP || trade.highestMarketCapPostTP <= 0) {
+                    trade.highestMarketCapPostTP = currentMC;
+                    await trade.save();
+                }
+                if (currentMC > trade.highestMarketCapPostTP) {
+                    trade.highestMarketCapPostTP = currentMC;
+                    await trade.save();
+                    console.log(`[TRADE-ENGINE] 🚀 Moonbag new peak for ${mint}: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)} USD)`);
+                }
+
+                const dropFromPeak = (currentMC - trade.highestMarketCapPostTP) / trade.highestMarketCapPostTP;
+                if (dropFromPeak <= -0.20) {
+                    console.log(`[TRADE-ENGINE] 🛑 Moonbag Trailing Stop (-20%) Triggered on ${mint}! Peak: ${trade.highestMarketCapPostTP.toFixed(2)} SOL ($${(trade.highestMarketCapPostTP * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${(dropFromPeak * 100).toFixed(1)}%. Selling remaining 25% moonbag!`);
+
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TRAILING_STOP_MOONBAG", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "TRAILING_STOP_MOONBAG";
+                        await trade.save();
+                    }
+                    continue;
+                }
             }
         }
     }
@@ -1090,7 +1164,7 @@ class TradeEngine {
                             source,
                             mirroredWallet
                         });
-                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 2x TP & -54% SL.`);
+                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 1.4x TP & -54% SL.`);
                         
                         const wsService = require('./pumpportal.service');
                         wsService.watchToken(mint);
@@ -1100,13 +1174,19 @@ class TradeEngine {
                     const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
                     const links = getTokenLinks(mint);
 
-                    let triggerDesc = 'Take Profit (2x) / Stop Loss Guard';
-                    if (source === 'TAKE_PROFIT_2X') {
+                    let triggerDesc = 'Take Profit (1.4x) / Stop Loss Guard';
+                    if (source === 'TAKE_PROFIT_1_4X') {
+                        triggerDesc = '🎯 *1.4x Take Profit* (Sold 75%, holding 25% moonbag)';
+                    } else if (source === 'TAKE_PROFIT_2X') {
                         triggerDesc = '🎯 *2x Take Profit* (Sold 75%, holding 25% moonbag)';
+                    } else if (source === 'TRAILING_STOP_MOONBAG') {
+                        triggerDesc = '🪂 *Moonbag Trailing Stop* (Sold 100% remaining moonbag at -20% from peak)';
                     } else if (source === 'STOP_LOSS_54') {
                         triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -54% drop)';
                     } else if (source === 'WHALE_MIRROR' || source === 'COPY_TRADE') {
                         triggerDesc = '🪞 *Mirrored Whale Exit* (Whale sold ➔ Sold 100%)';
+                    } else if (source === 'MANUAL_TELEGRAM' || source === 'MANUAL_PANIC') {
+                        triggerDesc = '⚡ *Manual Admin Execution*';
                     } else if (isReentry) {
                         triggerDesc = '🦅 Dip Re-entry Take Profit';
                     }
@@ -1123,9 +1203,10 @@ class TradeEngine {
 
                     if(tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
-                        if(trade && trade.status !== "PARTIAL_TP_1_4X" && trade.status !== "PARTIAL_TP_2X" && trade.status !== "TP_TAKEN_WAITING_REENTRY") {
+                        if(trade && source !== "TAKE_PROFIT_1_4X" && source !== "TAKE_PROFIT_2X") {
                             trade.status = "CLOSED";
                             trade.closedAt = new Date();
+                            trade.closeReason = source;
                             await trade.save();
                         }
                     }

@@ -1079,10 +1079,21 @@ Control automatic early token discovery (milestone sniper) and customize market 
 
     async handlePositions(ctx) {
         try {
+            const tradeEngine = require('./trade-engine.service');
+            const solPrice = solanaService.getSolPriceUSD() || 150;
+
             const [openTrades, recentClosed] = await Promise.all([
                 ActiveTrade.find({ status: { $in: ['OPEN', 'PARTIAL_TP_1_4X', 'PARTIAL_TP_2X', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).sort({ createdAt: -1 }),
                 ActiveTrade.find({ status: 'CLOSED' }).sort({ updatedAt: -1 }).limit(5)
             ]);
+
+            const formatMC = (mcUSD) => {
+                if (!mcUSD || mcUSD <= 0) return '$0';
+                if (mcUSD >= 1_000_000_000) return `$${(mcUSD / 1_000_000_000).toFixed(2)}B`;
+                if (mcUSD >= 1_000_000) return `$${(mcUSD / 1_000_000).toFixed(2)}M`;
+                if (mcUSD >= 1_000) return `$${(mcUSD / 1_000).toFixed(1)}k`;
+                return `$${Math.round(mcUSD).toLocaleString('en-US')}`;
+            };
 
             let text = `💼 *RAZOR ACTIVE POSITIONS & TRADES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
@@ -1090,28 +1101,94 @@ Control automatic early token discovery (milestone sniper) and customize market 
                 text += `🟢 *Active Positions:* None currently open.\n\n` +
                         `_Razor enters trades automatically when monitored whales buy or tokens hit 5K milestone progression ($10k ➔ $20k ➔ $50k)._\n\n`;
             } else {
-                text += `🟢 *Active Open Positions (${openTrades.length}):*\n`;
-                openTrades.forEach((t, i) => {
+                text += `🟢 *Active Open Positions (${openTrades.length}):*\n\n`;
+                for (let i = 0; i < openTrades.length; i++) {
+                    const t = openTrades[i];
                     const shortMint = `${t.mint.substring(0, 6)}...${t.mint.substring(t.mint.length - 6)}`;
-                    const statusBadge = (t.status === 'PARTIAL_TP_1_4X' || t.status === 'PARTIAL_TP_2X')
+
+                    // Resolve real-time live metadata and market cap
+                    let meta = null;
+                    try {
+                        meta = await tradeEngine.resolveTokenMetadata(t.mint, t.entryMarketCap);
+                    } catch {}
+
+                    const currentMC_USD = (meta && meta.marketCapUSD > 0)
+                        ? meta.marketCapUSD
+                        : ((t.entryMarketCapUSD && t.entryMarketCapUSD > 0) ? t.entryMarketCapUSD : ((t.entryMarketCap || 0) * solPrice));
+                    const currentMC_Sol = currentMC_USD > 0 ? (currentMC_USD / solPrice) : (t.entryMarketCap || 0);
+
+                    const entryMC_USD = (t.entryMarketCapUSD && t.entryMarketCapUSD > 0)
+                        ? t.entryMarketCapUSD
+                        : ((t.entryMarketCap || 0) * solPrice);
+                    const entryMC_Sol = (t.entryMarketCap && t.entryMarketCap > 0)
+                        ? t.entryMarketCap
+                        : (entryMC_USD > 0 ? (entryMC_USD / solPrice) : 0);
+
+                    // ROI Multiplier calculation
+                    let ratio = 1.0;
+                    if (entryMC_USD > 0 && currentMC_USD > 0) {
+                        ratio = currentMC_USD / entryMC_USD;
+                    } else if (entryMC_Sol > 0 && currentMC_Sol > 0) {
+                        ratio = currentMC_Sol / entryMC_Sol;
+                    }
+                    const roiPercent = (ratio - 1.0) * 100;
+                    const roiSign = roiPercent >= 0 ? '+' : '';
+                    const roiEmoji = roiPercent >= 0 ? '🟢' : '🔴';
+
+                    // Financial calculations: Invested vs Live Valuation vs Gain
+                    const investedSol = t.amountSolInvested || 0;
+                    const investedUSD = investedSol * solPrice;
+
+                    const isMoonbag = (t.status === 'PARTIAL_TP_1_4X' || t.status === 'PARTIAL_TP_2X');
+                    let liveValuationSol = 0;
+                    let netGainSol = 0;
+                    let netGainUSD = 0;
+
+                    if (isMoonbag) {
+                        // 75% realized at 1.4x (+40% on 75% = 1.05 * investedSol)
+                        const realizedSol = 0.75 * investedSol * 1.4;
+                        const moonbagSol = 0.25 * investedSol * ratio;
+                        liveValuationSol = realizedSol + moonbagSol;
+                        netGainSol = liveValuationSol - investedSol;
+                        netGainUSD = netGainSol * solPrice;
+                    } else {
+                        liveValuationSol = investedSol * ratio;
+                        netGainSol = liveValuationSol - investedSol;
+                        netGainUSD = netGainSol * solPrice;
+                    }
+
+                    const gainSign = netGainSol >= 0 ? '+' : '';
+
+                    const statusBadge = isMoonbag
                         ? '🎯 1.4x TP Taken (Holding 25% Moonbag)' 
-                        : (t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken' : '⚡ Open'));
-                    const entryDesc = t.entryMarketCapUSD > 0 
-                        ? `$${t.entryMarketCapUSD >= 1000 ? Math.round(t.entryMarketCapUSD / 1000) + 'k' : Math.round(t.entryMarketCapUSD)} MC`
-                        : `${t.entryMarketCap?.toFixed(2) || '0'} SOL MC`;
-                    text += `${i + 1}. *${t.tokenName || 'Token'}* (\`${shortMint}\`)\n` +
+                        : (t.status === 'REENTERED' ? '🔄 Re-entered (Dip)' : (t.status === 'TP_TAKEN_WAITING_REENTRY' ? '⏳ TP Taken' : '⚡ Active (Target: 1.4x TP)'));
+
+                    text += `${i + 1}. *${t.tokenName || meta?.name || 'Token'}* (\`${shortMint}\`)\n` +
                             `   • *Status:* ${statusBadge}\n` +
-                            `   • *Invested:* \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` (Entry: \`${entryDesc}\`)\n` +
-                            `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -54% SL\n` +
-                            `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
-                });
+                            `   • *Live PnL:* ${roiEmoji} *${roiSign}${roiPercent.toFixed(1)}% (${ratio.toFixed(2)}x)* | Net: \`${gainSign}${netGainSol.toFixed(4)} SOL\` (~${gainSign}$${Math.abs(netGainUSD).toFixed(2)})\n` +
+                            `   • *Position Value:* \`${liveValuationSol.toFixed(4)} SOL\` (~$${(liveValuationSol * solPrice).toFixed(2)}) vs Invested \`${investedSol.toFixed(4)} SOL\` (~$${investedUSD.toFixed(2)})\n` +
+                            `   • *Market Cap:* \`${formatMC(currentMC_USD)}\` (Entry: \`${formatMC(entryMC_USD)}\`)\n`;
+
+                    if (isMoonbag) {
+                        const peakSol = t.highestMarketCapPostTP > 0 ? t.highestMarketCapPostTP : (currentMC_Sol > entryMC_Sol ? currentMC_Sol : entryMC_Sol * 1.4);
+                        const peakUSD = peakSol * solPrice;
+                        const tslStopUSD = peakUSD * 0.80;
+                        const currentVsPeak = peakSol > 0 ? ((currentMC_Sol - peakSol) / peakSol) * 100 : 0;
+                        const peakDiffDesc = currentVsPeak >= 0 ? 'Peak ATH' : `${currentVsPeak.toFixed(1)}% from ATH`;
+                        text += `   • *Moonbag TSL:* Peak \`${formatMC(peakUSD)}\` | Trigger \`${formatMC(tslStopUSD)}\` (-20%) | \`${peakDiffDesc}\`\n`;
+                    }
+
+                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -54% SL • -20% TSL Moonbag\n` +
+                            `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [GMGN](https://gmgn.ai/sol/token/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
+                }
             }
 
             if (recentClosed.length > 0) {
                 text += `🏁 *Recently Settled Trades (${recentClosed.length}):*\n`;
                 recentClosed.forEach((t, i) => {
                     const shortMint = `${t.mint.substring(0, 4)}...${t.mint.substring(t.mint.length - 4)}`;
-                    text += `${i + 1}. [\`${shortMint}\`](https://pump.fun/${t.mint}) • \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` • ${t.source}\n`;
+                    const reason = t.closeReason ? `• \`${t.closeReason}\`` : (t.source ? `• ${t.source}` : '');
+                    text += `${i + 1}. [\`${shortMint}\`](https://gmgn.ai/sol/token/${t.mint}) • \`${t.amountSolInvested?.toFixed(4) || '0'} SOL\` ${reason}\n`;
                 });
                 text += `\n`;
             }

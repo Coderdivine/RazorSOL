@@ -39,6 +39,10 @@ const ActiveTradeSchema = new Schema(
     tp14xExecutedAt: {
       type: Date,
     },
+    highestMarketCapPostTP: {
+      type: Number,
+      default: 0,
+    },
     tp2xExecutedAt: {
       type: Date,
     },
