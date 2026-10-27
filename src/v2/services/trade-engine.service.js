@@ -725,10 +725,27 @@ class TradeEngine {
             });
             if (!activeTrades || activeTrades.length === 0) return;
 
+            await this.updateMyBalance();
+            if (this.myBalance < 0.0005) {
+                return; // Unfunded wallet, skip polling until funded
+            }
+
             const solPrice = solanaService.getSolPriceUSD() || 150;
 
             for (const trade of activeTrades) {
                 try {
+                    // If wallet holds zero tokens and trade is older than 5 minutes, auto-close
+                    if (this.myWalletKey) {
+                        const tokenBal = await solanaService.getTokenBalance(this.myWalletKey, trade.mint);
+                        if (tokenBal <= 0 && (Date.now() - new Date(trade.createdAt).getTime()) > 300000) {
+                            trade.status = "CLOSED";
+                            trade.closeReason = "ZERO_TOKEN_BALANCE";
+                            trade.closedAt = new Date();
+                            await trade.save();
+                            continue;
+                        }
+                    }
+
                     const meta = await this.resolveTokenMetadata(trade.mint);
                     if (meta && meta.marketCapUSD > 0) {
                         const currentMC_Sol = meta.marketCapUSD / solPrice;
