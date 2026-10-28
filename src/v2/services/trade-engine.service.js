@@ -38,7 +38,12 @@ function getTokenLinks(mint) {
 
 class TradeEngine {
     constructor() {
-        this.connection = new Connection(SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", 'confirmed');
+        const defaultWss = "wss://api.mainnet-beta.solana.com";
+        const wsUrl = process.env.SOLANA_WSS_URL || defaultWss;
+        this.connection = new Connection(SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", {
+            commitment: 'confirmed',
+            wsEndpoint: wsUrl
+        });
         // Base keys
         this.myWalletKey = WALLET_PUBLIC_KEY;
         this.myKeypair = null;

@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const WatchedWallet = require('../models/WatchedWallet');
-const { SOLANA_RPC_URL, INFURA_API_KEY, INFURA_SOLANA_RPC_URL } = process.env;
+const { SOLANA_RPC_URL, INFURA_API_KEY, INFURA_SOLANA_RPC_URL, SOLANA_WSS_URL } = process.env;
 
 const BASE_MINTS = new Set([
     'So11111111111111111111111111111111111111112', // WSOL
@@ -15,10 +15,24 @@ class SolanaService {
         const infuraKey = INFURA_API_KEY || (INFURA_SOLANA_RPC_URL ? INFURA_SOLANA_RPC_URL.split('/').pop() : '');
         this.infuraRpcUrl = INFURA_SOLANA_RPC_URL || (infuraKey ? `https://solana-mainnet.infura.io/v3/${infuraKey}` : null);
         this.rpcUrl = this.infuraRpcUrl || SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-        this.connection = new Connection(this.rpcUrl, 'confirmed');
-        this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, 'confirmed') : this.connection;
+
+        // WebSocket endpoint: Infura is an HTTP JSON-RPC provider and does NOT support Solana pub/sub WebSocket subscriptions (onLogs, onAccountChange).
+        // Without an explicit wsEndpoint, @solana/web3.js attempts to open a WebSocket to Infura, receiving HTTP 200 and throwing "ws error: Unexpected server response: 200".
+        // Directing WebSocket subscriptions to a dedicated Solana WSS endpoint resolves this cleanly.
+        const defaultWss = "wss://api.mainnet-beta.solana.com";
+        this.wsEndpoint = SOLANA_WSS_URL || defaultWss;
+
+        this.connection = new Connection(this.rpcUrl, {
+            commitment: 'confirmed',
+            wsEndpoint: this.wsEndpoint
+        });
+        this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, {
+            commitment: 'confirmed',
+            wsEndpoint: this.wsEndpoint
+        }) : this.connection;
 
         console.log(`[SOLANA-RPC] ⚡ Primary Solana RPC active: ${this.infuraRpcUrl ? 'Infura Paid High-Performance RPC' : this.rpcUrl}`);
+        console.log(`[SOLANA-RPC] 🔌 Solana WebSocket endpoint active: ${this.wsEndpoint}`);
 
         this.cachedSolPrice = 150;
         this.activeRpcSubscriptions = new Map();
