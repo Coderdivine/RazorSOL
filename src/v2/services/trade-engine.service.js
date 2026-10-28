@@ -1010,24 +1010,69 @@ class TradeEngine {
             const entryMC = trade.entryMarketCap; // in SOL
             const ratio = currentMC / entryMC;
             const pnlPercent = (ratio - 1.0) * 100;
+            const tradeAgeMs = Date.now() - new Date(trade.createdAt).getTime();
+            const tradeAgeMinutes = tradeAgeMs / 60000;
 
-            // RULE 1: Stop Loss at -54% drop from entry -> SELL OFF 100%
-            // "If the coin goes down by -54% we sell off."
-            if (ratio <= 0.46 || pnlPercent <= -54) {
-                console.log(`[TRADE-ENGINE] 🛑 Stop Loss (-54%) Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${pnlPercent.toFixed(1)}%. Executing 100% SELL OFF!`);
+            // Track highest ratio seen
+            if (ratio > (trade.highestRatioSeen || 1.0)) {
+                trade.highestRatioSeen = ratio;
+                await trade.save();
+            }
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_54", null, trade._id);
+            // RULE 1: HARD STOP LOSS AT -28% DROP FROM ENTRY -> SELL OFF 100%
+            // Tightened from -54% to -28% so 1 winning trade (+40% TP) completely recovers 1 loss!
+            if (ratio <= 0.72 || pnlPercent <= -28) {
+                console.log(`[TRADE-ENGINE] 🛑 Tight Stop Loss (-28%) Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${pnlPercent.toFixed(1)}%. Executing 100% SELL OFF!`);
+
+                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_28", null, trade._id);
                 if (sellSig) {
                     trade.status = "CLOSED";
                     trade.closedAt = new Date();
-                    trade.closeReason = "STOP_LOSS_54";
+                    trade.closeReason = "STOP_LOSS_28";
                     await trade.save();
                 }
                 continue;
             }
 
-            // RULE 2: Take Profit at 1.4x gain -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
-            // "Instead of 2x at the first buy let us use 1.4x for now."
+            // RULE 2: BREAKEVEN GUARD (ARM AT +20%, EXIT AT ENTRY PRICE / $0 LOSS)
+            // Once coin pumps to +20%, lock in $0 loss protection. If it retraces to entry (<= 1.00x), exit 100%!
+            if (trade.status === "OPEN") {
+                if (!trade.isBreakevenArmed && (ratio >= 1.20 || pnlPercent >= 20)) {
+                    trade.isBreakevenArmed = true;
+                    console.log(`[TRADE-ENGINE] 🛡️ Breakeven Guard ARMED for ${mint}! Coin reached +${pnlPercent.toFixed(1)}% (≥ +20%). Stop Loss moved to Entry Price ($0 risk).`);
+                    await trade.save();
+                }
+
+                if (trade.isBreakevenArmed && ratio <= 1.00) {
+                    console.log(`[TRADE-ENGINE] 🛡️ Breakeven Stop Triggered on ${mint}! Peaked at +${(((trade.highestRatioSeen || 1.2) - 1) * 100).toFixed(1)}%, now retraced to entry price (${ratio.toFixed(2)}x). Exiting 100% to guarantee $0 LOSS!`);
+
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "BREAKEVEN_STOP", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "BREAKEVEN_STOP";
+                        await trade.save();
+                    }
+                    continue;
+                }
+            }
+
+            // RULE 3: 15-MINUTE STAGNATION / DEAD TRADE TIMEOUT
+            // If open for >= 15 minutes and token is in the red (<= -15%) with zero momentum, cut early!
+            if (trade.status === "OPEN" && tradeAgeMinutes >= 15 && (ratio <= 0.85 || pnlPercent <= -15)) {
+                console.log(`[TRADE-ENGINE] ⏳ 15-Min Stagnation Guard Triggered on ${mint}! Open for ${tradeAgeMinutes.toFixed(1)}m | PnL: ${pnlPercent.toFixed(1)}%. Zero momentum. Cutting trade early to protect remaining ${(ratio * 100).toFixed(0)}% capital!`);
+
+                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TIMEOUT_STAGNANT_15M", null, trade._id);
+                if (sellSig) {
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "TIMEOUT_STAGNANT_15M";
+                    await trade.save();
+                }
+                continue;
+            }
+
+            // RULE 4: TAKE PROFIT AT 1.4x GAIN -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
             if (ratio >= 1.4 && trade.status === "OPEN") {
                 console.log(`[TRADE-ENGINE] 💸 1.4x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
 
@@ -1041,8 +1086,7 @@ class TradeEngine {
                 continue;
             }
 
-            // RULE 3: Trailing Stop on the 25% Moonbag (-20% from post-TP peak)
-            // Once 1.4x TP is taken (75% sold), dynamically track highest MC post-TP and sell remaining 25% if MC drops 20% from peak
+            // RULE 5: TRAILING STOP ON THE 25% MOONBAG (-20% FROM POST-TP PEAK)
             if (trade.status === "PARTIAL_TP_1_4X" || trade.status === "PARTIAL_TP_2X") {
                 if (!trade.highestMarketCapPostTP || trade.highestMarketCapPostTP <= 0) {
                     trade.highestMarketCapPostTP = currentMC;
@@ -1207,7 +1251,7 @@ class TradeEngine {
                             convictionTier,
                             priorityFeePaid: priorityFee
                         });
-                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 1.4x TP & -54% SL.`);
+                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 1.4x TP, +20% Breakeven Arm, -28% SL & 15m Timeout.`);
                         
                         const wsService = require('./pumpportal.service');
                         wsService.watchToken(mint);
@@ -1222,10 +1266,14 @@ class TradeEngine {
                         triggerDesc = '🎯 *1.4x Take Profit* (Sold 75%, holding 25% moonbag)';
                     } else if (source === 'TAKE_PROFIT_2X') {
                         triggerDesc = '🎯 *2x Take Profit* (Sold 75%, holding 25% moonbag)';
+                    } else if (source === 'BREAKEVEN_STOP') {
+                        triggerDesc = '🛡️ *Breakeven Guard* (Hit +20% peak, exited at entry price to preserve $0 loss)';
+                    } else if (source === 'TIMEOUT_STAGNANT_15M') {
+                        triggerDesc = '⏳ *15-Min Stagnation Guard* (Position stalled in red for 15m; cut early)';
+                    } else if (source === 'STOP_LOSS_28' || source === 'STOP_LOSS_54') {
+                        triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -28% drop)';
                     } else if (source === 'TRAILING_STOP_MOONBAG') {
                         triggerDesc = '🪂 *Moonbag Trailing Stop* (Sold 100% remaining moonbag at -20% from peak)';
-                    } else if (source === 'STOP_LOSS_54') {
-                        triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -54% drop)';
                     } else if (source === 'WHALE_MIRROR' || source === 'COPY_TRADE') {
                         triggerDesc = '🪞 *Mirrored Whale Exit* (Whale sold ➔ Sold 100%)';
                     } else if (source === 'MANUAL_TELEGRAM' || source === 'MANUAL_PANIC') {

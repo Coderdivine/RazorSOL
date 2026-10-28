@@ -1174,6 +1174,10 @@ Control automatic early token discovery (milestone sniper) and customize market 
                         text += `   • *Whale Conviction:* \`${tierLabel}\` (Gas: \`${t.priorityFeePaid || 0.0001} SOL\`)\n`;
                     }
 
+                    if (t.isBreakevenArmed && t.status === 'OPEN') {
+                        text += `   • *Protection:* 🛡️ \`Breakeven Armed ($0 Loss Guaranteed)\`\n`;
+                    }
+
                     if (isMoonbag) {
                         const peakSol = t.highestMarketCapPostTP > 0 ? t.highestMarketCapPostTP : (currentMC_Sol > entryMC_Sol ? currentMC_Sol : entryMC_Sol * 1.4);
                         const peakUSD = peakSol * solPrice;
@@ -1183,7 +1187,7 @@ Control automatic early token discovery (milestone sniper) and customize market 
                         text += `   • *Moonbag TSL:* Peak \`${formatMC(peakUSD)}\` | Trigger \`${formatMC(tslStopUSD)}\` (-20%) | \`${peakDiffDesc}\`\n`;
                     }
 
-                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -54% SL • -20% TSL Moonbag\n` +
+                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -28% SL • +20% Breakeven • 15m Timeout • -20% TSL Moonbag\n` +
                             `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [GMGN](https://gmgn.ai/sol/token/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
                 }
             }

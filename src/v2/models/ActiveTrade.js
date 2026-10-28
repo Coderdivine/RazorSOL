@@ -43,6 +43,14 @@ const ActiveTradeSchema = new Schema(
       type: Number,
       default: 0,
     },
+    isBreakevenArmed: {
+      type: Boolean,
+      default: false,
+    },
+    highestRatioSeen: {
+      type: Number,
+      default: 1.0,
+    },
     tp2xExecutedAt: {
       type: Date,
     },
