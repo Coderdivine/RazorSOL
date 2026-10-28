@@ -1193,10 +1193,10 @@ Control automatic early token discovery (milestone sniper) and customize market 
                         const tslStopUSD = peakUSD * 0.80;
                         const currentVsPeak = peakSol > 0 ? ((currentMC_Sol - peakSol) / peakSol) * 100 : 0;
                         const peakDiffDesc = currentVsPeak >= 0 ? 'Peak ATH' : `${currentVsPeak.toFixed(1)}% from ATH`;
-                        text += `   • *Moonbag Status:* Peak \`${formatMC(peakUSD)}\` | TSL \`${formatMC(tslStopUSD)}\` (-20%) | Floor \`${formatMC(entryMC_USD)}\` (\`${peakDiffDesc}\`)\n`;
+                        text += `   • *Moonbag Status:* Peak \`${formatMC(peakUSD)}\` | Cap \`${formatMC(entryMC_USD * 5)}\` (5x Max) | TSL \`${formatMC(tslStopUSD)}\` (-20%) | Floor \`${formatMC(entryMC_USD)}\` (\`${peakDiffDesc}\`)\n`;
                     }
 
-                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Exit (>15% / $100+) • -28% SL • +20% Breakeven • 15m Timeout • Moonbag (-20% TSL / Entry Floor / 30m)\n` +
+                    text += `   • *Rules:* 1.4x TP (Sell 75%) • 5x Max Moonbag TP • Whale Exit (>15% / $100+) • -28% SL • +20% Breakeven • 15m Timeout • Moonbag (-20% TSL / Entry Floor / 30m)\n` +
                             `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [GMGN](https://gmgn.ai/sol/token/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
                 }
             }

@@ -1083,6 +1083,20 @@ class TradeEngine {
             }
 
             // RULE 4: TAKE PROFIT AT 1.4x GAIN -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
+            // If price surges directly to 5.0x (+400%) while OPEN, exit 100% immediately!
+            if (ratio >= 5.0 && trade.status === "OPEN") {
+                console.log(`[TRADE-ENGINE] 🚀 5x Moonshot Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% full bag!`);
+
+                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0005, "MAX_TP_5X", null, trade._id);
+                if (sellSig) {
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "MAX_TP_5X";
+                    await trade.save();
+                }
+                continue;
+            }
+
             if (ratio >= 1.4 && trade.status === "OPEN") {
                 console.log(`[TRADE-ENGINE] 💸 1.4x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
 
@@ -1097,7 +1111,7 @@ class TradeEngine {
             }
 
             // RULE 5: ADVANCED MOONBAG LIFECYCLE (25% HOLDING PHASE)
-            // "The reality is that most coin dies so let the moonbag find a way around this."
+            // "Let the max be 5x for now."
             if (trade.status === "PARTIAL_TP_1_4X" || trade.status === "PARTIAL_TP_2X") {
                 if (!trade.highestMarketCapPostTP || trade.highestMarketCapPostTP <= 0) {
                     trade.highestMarketCapPostTP = currentMC;
@@ -1115,7 +1129,22 @@ class TradeEngine {
 
                 const moonbagExitFee = Number(Math.min(0.0005, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
 
-                // 5A. Trailing Stop: Pullback -20% from highest post-TP peak
+                // 5A. Max 5x Hard Take Profit Cap: "Let the max be 5x for now"
+                // If moonbag surges to 5.0x (+400%), cash out 100% of remaining moonbag immediately!
+                if (ratio >= 5.0 || pnlPercent >= 400) {
+                    console.log(`[TRADE-ENGINE] 🚀 5x Moonbag Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% of moonbag to lock in 5x win!`);
+
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_MAX_TP_5X", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "MOONBAG_MAX_TP_5X";
+                        await trade.save();
+                    }
+                    continue;
+                }
+
+                // 5B. Trailing Stop: Pullback -20% from highest post-TP peak
                 if (dropFromPeak <= -0.20) {
                     console.log(`[TRADE-ENGINE] 🛑 Moonbag Trailing Stop (-20%) Triggered on ${mint}! Peak: ${trade.highestMarketCapPostTP.toFixed(2)} SOL ($${(trade.highestMarketCapPostTP * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${(dropFromPeak * 100).toFixed(1)}%. Selling remaining 25% moonbag!`);
 
@@ -1129,7 +1158,7 @@ class TradeEngine {
                     continue;
                 }
 
-                // 5B. Hard Moonbag Floor (Entry Price / 1.00x): Never let moonbag round-trip into a loss!
+                // 5C. Hard Moonbag Floor (Entry Price / 1.00x): Never let moonbag round-trip into a loss!
                 if (ratio <= 1.00) {
                     console.log(`[TRADE-ENGINE] 🛡️ Moonbag Entry Floor Triggered on ${mint}! Price retraced to entry (${ratio.toFixed(2)}x). Cashing out remaining 25% bag at breakeven!`);
 
@@ -1143,7 +1172,7 @@ class TradeEngine {
                     continue;
                 }
 
-                // 5C. Moonbag 30-Min Expiration Timeout: Most coins die within 30m; cash out before volume dries completely
+                // 5D. Moonbag 30-Min Expiration Timeout: Most coins die within 30m; cash out before volume dries completely
                 if (minutesSinceTP >= 30 && (dropFromPeak <= -0.10 || minutesSinceTP >= 45)) {
                     console.log(`[TRADE-ENGINE] ⏳ Moonbag 30-Min Expiration Triggered on ${mint}! ${minutesSinceTP.toFixed(1)}m elapsed post-TP. Cashing out remaining 25% bag into SOL before token dies!`);
 
@@ -1307,7 +1336,9 @@ class TradeEngine {
                     const links = getTokenLinks(mint);
 
                     let triggerDesc = 'Take Profit (1.4x) / Stop Loss Guard';
-                    if (source === 'TAKE_PROFIT_1_4X') {
+                    if (source === 'MOONBAG_MAX_TP_5X' || source === 'MAX_TP_5X') {
+                        triggerDesc = '🚀 *5x Max Target Hit!* (Cashed out 100% full profit at 5.0x / +400% gain)';
+                    } else if (source === 'TAKE_PROFIT_1_4X') {
                         triggerDesc = '🎯 *1.4x Take Profit* (Sold 75%, holding 25% moonbag)';
                     } else if (source === 'TAKE_PROFIT_2X') {
                         triggerDesc = '🎯 *2x Take Profit* (Sold 75%, holding 25% moonbag)';
