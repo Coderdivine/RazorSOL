@@ -40,7 +40,8 @@ class TradeEngine {
     constructor() {
         const defaultWss = "wss://api.mainnet-beta.solana.com";
         const wsUrl = process.env.SOLANA_WSS_URL || defaultWss;
-        this.connection = new Connection(SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", {
+        const configuredRpc = SOLANA_RPC_URL && !SOLANA_RPC_URL.includes('infura.io') ? SOLANA_RPC_URL : null;
+        this.connection = new Connection(configuredRpc || "https://api.mainnet-beta.solana.com", {
             commitment: 'confirmed',
             wsEndpoint: wsUrl
         });
@@ -1247,8 +1248,13 @@ class TradeEngine {
                 try {
                     let freshBlockhash = null;
                     if (solanaService.infuraConnection) {
-                        const { blockhash } = await solanaService.infuraConnection.getLatestBlockhash('confirmed');
-                        freshBlockhash = blockhash;
+                        try {
+                            const { blockhash } = await solanaService.infuraConnection.getLatestBlockhash('confirmed');
+                            freshBlockhash = blockhash;
+                        } catch (infuraBhErr) {
+                            const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
+                            freshBlockhash = blockhash;
+                        }
                     } else {
                         const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
                         freshBlockhash = blockhash;

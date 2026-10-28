@@ -11,14 +11,16 @@ const BASE_MINTS = new Set([
 
 class SolanaService {
     constructor() {
-        // Use Infura Paid RPC as primary connection whenever configured
+        // 1. Infura RPC Configuration (Dedicated VIP for critical trades, blockhash & dynamic failover)
         const infuraKey = INFURA_API_KEY || (INFURA_SOLANA_RPC_URL ? INFURA_SOLANA_RPC_URL.split('/').pop() : '');
         this.infuraRpcUrl = INFURA_SOLANA_RPC_URL || (infuraKey ? `https://solana-mainnet.infura.io/v3/${infuraKey}` : null);
-        this.rpcUrl = this.infuraRpcUrl || SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 
-        // WebSocket endpoint: Infura is an HTTP JSON-RPC provider and does NOT support Solana pub/sub WebSocket subscriptions (onLogs, onAccountChange).
-        // Without an explicit wsEndpoint, @solana/web3.js attempts to open a WebSocket to Infura, receiving HTTP 200 and throwing "ws error: Unexpected server response: 200".
-        // Directing WebSocket subscriptions to a dedicated Solana WSS endpoint resolves this cleanly.
+        // 2. Public RPC for routine, high-volume background tasks (balance polling, token supply, metadata, whale logs)
+        // This preserves the Infura free tier (100k requests/day) strictly for VIP trade execution and failovers.
+        const configuredRpc = SOLANA_RPC_URL && !SOLANA_RPC_URL.includes('infura.io') ? SOLANA_RPC_URL : null;
+        this.rpcUrl = configuredRpc || "https://api.mainnet-beta.solana.com";
+
+        // WebSocket endpoint
         const defaultWss = "wss://api.mainnet-beta.solana.com";
         this.wsEndpoint = SOLANA_WSS_URL || defaultWss;
 
@@ -26,12 +28,31 @@ class SolanaService {
             commitment: 'confirmed',
             wsEndpoint: this.wsEndpoint
         });
+
+        // Infura VIP Connection (used exclusively for transaction racing and fallback)
         this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, {
             commitment: 'confirmed',
             wsEndpoint: this.wsEndpoint
-        }) : this.connection;
+        }) : null;
 
-        console.log(`[SOLANA-RPC] ⚡ Primary Solana RPC active: ${this.infuraRpcUrl ? 'Infura Paid High-Performance RPC' : this.rpcUrl}`);
+        console.log(`[SOLANA-RPC] ⚡ Primary Public RPC active: ${this.rpcUrl}`);
+        if (this.infuraRpcUrl) {
+            console.log(`[SOLANA-RPC] 🛡️ Infura VIP RPC configured for critical trades & failover: ${this.infuraRpcUrl.substring(0, 38)}...`);
+            // Non-blocking verification to ensure Solana network is toggled on in Infura settings
+            if (typeof globalThis.fetch === 'function') {
+                globalThis.fetch(this.infuraRpcUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getVersion' })
+                }).then(async res => {
+                    if (res.status === 200) {
+                        console.log(`[SOLANA-RPC] ✅ Infura Solana VIP network confirmed active & ready.`);
+                    } else if (res.status === 401) {
+                        console.log(`[SOLANA-RPC] ⚠️ Infura Notice: Solana network is not yet toggled ON for this key. Please open Infura Dashboard -> Configure -> Enable Solana.`);
+                    }
+                }).catch(() => {});
+            }
+        }
         console.log(`[SOLANA-RPC] 🔌 Solana WebSocket endpoint active: ${this.wsEndpoint}`);
 
         this.cachedSolPrice = 150;
