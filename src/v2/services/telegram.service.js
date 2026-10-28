@@ -264,10 +264,13 @@ class TelegramService {
             if (!openTrades || openTrades.length === 0) {
                 return ctx.reply('ℹ️ No active open positions found to sell.');
             }
+            await tradeEngine.updateMyBalance();
+            const panicFee = Number(Math.min(0.0008, Math.max(0.0001, tradeEngine.myBalance - 0.0004)).toFixed(5));
+
             for (const trade of openTrades) {
                 const label = trade.tokenName || trade.mint.substring(0, 8);
-                const statusMsg = await ctx.reply(`🚨 *Manual Exit:* Selling 100% of *${label}* via Infura Paid RPC...`, { parse_mode: 'Markdown' });
-                const sig = await tradeEngine.executeTradeLocal(trade.mint, "sell", "100%", false, 0.0001, "MANUAL_PANIC", null, trade._id);
+                const statusMsg = await ctx.reply(`🚨 *Emergency Manual Exit:* Selling 100% of *${label}* (Fast Priority: \`${panicFee} SOL\`) via Infura Paid RPC...`, { parse_mode: 'Markdown' });
+                const sig = await tradeEngine.executeTradeLocal(trade.mint, "sell", "100%", false, panicFee, "MANUAL_PANIC", null, trade._id);
                 if (sig) {
                     trade.status = "CLOSED";
                     trade.closedAt = new Date();
@@ -702,10 +705,13 @@ _Tap any button below or use the pinned menu at the bottom:_`;
         // Interactive 1-Tap Sell 100% action
         this.bot.action(/^action_sell_100:(.+)$/, async (ctx) => {
             const mint = ctx.match[1];
-            await ctx.answerCbQuery('⚡ Executing 100% Sell...').catch(() => {});
+            await ctx.answerCbQuery('⚡ Executing Fast 100% Sell...').catch(() => {});
             const tradeEngine = require('./trade-engine.service');
 
-            const statusMsg = await ctx.reply(`⏳ *Executing 100% Sell for \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            await tradeEngine.updateMyBalance();
+            const emergencyFee = Number(Math.min(0.0008, Math.max(0.0001, tradeEngine.myBalance - 0.0004)).toFixed(5));
+
+            const statusMsg = await ctx.reply(`⏳ *Executing Fast 100% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${emergencyFee} SOL\`) via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
 
             const activeTrade = await ActiveTrade.findOne({
                 mint,
@@ -713,7 +719,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             });
             const tradeId = activeTrade ? activeTrade._id : null;
 
-            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "MANUAL_TELEGRAM", null, tradeId);
+            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "100%", false, emergencyFee, "MANUAL_TELEGRAM", null, tradeId);
             if (sig) {
                 if (activeTrade) {
                     activeTrade.status = "CLOSED";
@@ -747,9 +753,12 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await ctx.answerCbQuery('⚡ Executing 50% Sell...').catch(() => {});
             const tradeEngine = require('./trade-engine.service');
 
-            const statusMsg = await ctx.reply(`⏳ *Executing 50% Sell for \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            await tradeEngine.updateMyBalance();
+            const partialFee = Number(Math.min(0.0005, Math.max(0.0001, tradeEngine.myBalance - 0.0004)).toFixed(5));
 
-            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "50%", false, 0.0001, "MANUAL_TELEGRAM");
+            const statusMsg = await ctx.reply(`⏳ *Executing 50% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${partialFee} SOL\`) via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+
+            const sig = await tradeEngine.executeTradeLocal(mint, "sell", "50%", false, partialFee, "MANUAL_TELEGRAM");
             if (sig) {
                 await ctx.telegram.editMessageText(
                     ctx.chat.id,
@@ -1184,10 +1193,10 @@ Control automatic early token discovery (milestone sniper) and customize market 
                         const tslStopUSD = peakUSD * 0.80;
                         const currentVsPeak = peakSol > 0 ? ((currentMC_Sol - peakSol) / peakSol) * 100 : 0;
                         const peakDiffDesc = currentVsPeak >= 0 ? 'Peak ATH' : `${currentVsPeak.toFixed(1)}% from ATH`;
-                        text += `   • *Moonbag TSL:* Peak \`${formatMC(peakUSD)}\` | Trigger \`${formatMC(tslStopUSD)}\` (-20%) | \`${peakDiffDesc}\`\n`;
+                        text += `   • *Moonbag Status:* Peak \`${formatMC(peakUSD)}\` | TSL \`${formatMC(tslStopUSD)}\` (-20%) | Floor \`${formatMC(entryMC_USD)}\` (\`${peakDiffDesc}\`)\n`;
                     }
 
-                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Sell (All) • -28% SL • +20% Breakeven • 15m Timeout • -20% TSL Moonbag\n` +
+                    text += `   • *Rules:* 1.4x TP (Sell 75%) • Whale Exit (>15% / $100+) • -28% SL • +20% Breakeven • 15m Timeout • Moonbag (-20% TSL / Entry Floor / 30m)\n` +
                             `   • *Links:* [DexScreener](https://dexscreener.com/solana/${t.mint}) | [Pump.fun](https://pump.fun/${t.mint}) | [GMGN](https://gmgn.ai/sol/token/${t.mint}) | [Solscan](https://solscan.io/token/${t.mint})\n\n`;
                 }
             }

@@ -633,7 +633,7 @@ class TradeEngine {
         }
 
         // 2. Whale Sell Mirroring: If Razor Bot holds an active position for this token, sell ALL (100%)!
-        // "If the whale sell we sell all. Alll."
+        // User rule: "Ensure the whale sell is a meaningful exit (e.g., whale sold > 15% of their bag, or sold at least $100+) before dumping our entire position."
         let razorActionDesc = 'ℹ️ No Active Position';
         try {
             const activeTrades = await ActiveTrade.find({
@@ -642,33 +642,42 @@ class TradeEngine {
             });
 
             if (activeTrades && activeTrades.length > 0) {
-                await this.updateMyBalance();
-                if (this.myBalance >= 0.0005) {
-                    console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Whale sold. Selling ALL (100%) remaining bag...`);
-                    // Dynamic exit priority fee to front-run whale dumping if large volume
-                    let exitPriorityFee = 0.0001;
-                    if (receivedUsd >= 5000) {
-                        exitPriorityFee = 0.0008; // High speed exit on whale dump
-                    } else if (receivedUsd >= 2500) {
-                        exitPriorityFee = 0.0003;
-                    }
-                    // Profit Guard on exit: ensure fee does not exceed available SOL buffer
-                    exitPriorityFee = Number(Math.min(exitPriorityFee, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
+                // Filter out dust/micro-test sells:
+                // Whale must sell >= $100 USD OR >= 15% of their position for us to mirror exit.
+                const isMeaningfulWhaleExit = (receivedUsd >= 100) || (whalePos && sellRatio >= 0.15);
 
-                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, exitPriorityFee, "WHALE_MIRROR", watchedWallet.walletAddress);
-                    if (sellSig) {
-                        for (let trade of activeTrades) {
-                            trade.status = "CLOSED";
-                            trade.closedAt = new Date();
-                            trade.closeReason = "WHALE_MIRROR";
-                            await trade.save();
-                        }
-                        razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ [Solscan](https://solscan.io/tx/${sellSig}))`;
-                    } else {
-                        razorActionDesc = `⚠️ *Sell Attempted* (Broadcast pending)`;
-                    }
+                if (!isMeaningfulWhaleExit) {
+                    console.log(`[TRADE-ENGINE] ℹ️ Whale Sell is micro-test/dust ($${receivedUsd.toFixed(2)}, ${(sellRatio * 100).toFixed(1)}% of bag). Skipping 100% position dump.`);
+                    razorActionDesc = `⏸️ *Held Position* (Whale micro-test/dust: < $100 & < 15%)`;
                 } else {
-                    razorActionDesc = `⏸️ *Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`;
+                    await this.updateMyBalance();
+                    if (this.myBalance >= 0.0005) {
+                        console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Whale sold meaningful volume ($${receivedUsd.toFixed(0)}, ${(sellRatio * 100).toFixed(1)}%). Selling ALL (100%) remaining bag...`);
+                        // Dynamic exit priority fee to front-run whale dumping if large volume
+                        let exitPriorityFee = 0.0003;
+                        if (receivedUsd >= 5000) {
+                            exitPriorityFee = 0.0008; // High speed exit on whale dump
+                        } else if (receivedUsd >= 2500) {
+                            exitPriorityFee = 0.0005;
+                        }
+                        // Profit Guard on exit: ensure fee does not exceed available SOL buffer
+                        exitPriorityFee = Number(Math.min(exitPriorityFee, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
+
+                        const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, exitPriorityFee, "WHALE_MIRROR", watchedWallet.walletAddress);
+                        if (sellSig) {
+                            for (let trade of activeTrades) {
+                                trade.status = "CLOSED";
+                                trade.closedAt = new Date();
+                                trade.closeReason = "WHALE_MIRROR";
+                                await trade.save();
+                            }
+                            razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ [Solscan](https://solscan.io/tx/${sellSig}))`;
+                        } else {
+                            razorActionDesc = `⚠️ *Sell Attempted* (Broadcast pending)`;
+                        }
+                    } else {
+                        razorActionDesc = `⏸️ *Skipped* (Wallet Unfunded — \`0.0000 SOL\`)`;
+                    }
                 }
             }
         } catch (copyErr) {
@@ -815,16 +824,17 @@ class TradeEngine {
             console.log(`[TRADE-ENGINE] ℹ️ Token ${tradeEvent.mint} MC is ${mcTracker} (>= $500k). Skipping copy-buy.`);
         }
 
-        // 1. SINGLE ACTIVE POSITION GATE: Only 1 trade open at a time.
-        // If an active position is open, wait until it closes before entering the next coin.
+        // 1. SINGLE ACTIVE POSITION GATE: Only block if we have an un-secured OPEN trade.
+        // If a trade has already taken 1.4x TP (status: PARTIAL_TP_1_4X), our principal is back in SOL!
+        // The 25% moonbag rides passively in the background, freeing our liquid SOL to enter the next qualified whale coin.
         if (canExecuteBuy) {
             const openTrade = await ActiveTrade.findOne({
-                status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
+                status: { $in: ["OPEN", "REENTERED"] }
             });
             if (openTrade) {
                 canExecuteBuy = false;
-                skipReason = `Active position already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)} (Single Trade Mode)`;
-                console.log(`[TRADE-ENGINE] 🛑 Active position already open (${openTrade.mint.substring(0,6)}...). Skipping new trade until active position is exited.`);
+                skipReason = `Active un-secured trade already open for ${openTrade.tokenName || openTrade.mint.substring(0, 6)} (Awaiting 1.4x TP or exit)`;
+                console.log(`[TRADE-ENGINE] 🛑 Active un-secured trade already open (${openTrade.mint.substring(0,6)}...). Skipping new buy until it reaches 1.4x TP or exits.`);
             }
         }
 
@@ -1086,7 +1096,8 @@ class TradeEngine {
                 continue;
             }
 
-            // RULE 5: TRAILING STOP ON THE 25% MOONBAG (-20% FROM POST-TP PEAK)
+            // RULE 5: ADVANCED MOONBAG LIFECYCLE (25% HOLDING PHASE)
+            // "The reality is that most coin dies so let the moonbag find a way around this."
             if (trade.status === "PARTIAL_TP_1_4X" || trade.status === "PARTIAL_TP_2X") {
                 if (!trade.highestMarketCapPostTP || trade.highestMarketCapPostTP <= 0) {
                     trade.highestMarketCapPostTP = currentMC;
@@ -1099,14 +1110,48 @@ class TradeEngine {
                 }
 
                 const dropFromPeak = (currentMC - trade.highestMarketCapPostTP) / trade.highestMarketCapPostTP;
+                const tpTime = trade.tp14xExecutedAt ? new Date(trade.tp14xExecutedAt).getTime() : new Date(trade.createdAt).getTime();
+                const minutesSinceTP = (Date.now() - tpTime) / 60000;
+
+                const moonbagExitFee = Number(Math.min(0.0005, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
+
+                // 5A. Trailing Stop: Pullback -20% from highest post-TP peak
                 if (dropFromPeak <= -0.20) {
                     console.log(`[TRADE-ENGINE] 🛑 Moonbag Trailing Stop (-20%) Triggered on ${mint}! Peak: ${trade.highestMarketCapPostTP.toFixed(2)} SOL ($${(trade.highestMarketCapPostTP * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${(dropFromPeak * 100).toFixed(1)}%. Selling remaining 25% moonbag!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TRAILING_STOP_MOONBAG", null, trade._id);
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "TRAILING_STOP_MOONBAG", null, trade._id);
                     if (sellSig) {
                         trade.status = "CLOSED";
                         trade.closedAt = new Date();
                         trade.closeReason = "TRAILING_STOP_MOONBAG";
+                        await trade.save();
+                    }
+                    continue;
+                }
+
+                // 5B. Hard Moonbag Floor (Entry Price / 1.00x): Never let moonbag round-trip into a loss!
+                if (ratio <= 1.00) {
+                    console.log(`[TRADE-ENGINE] 🛡️ Moonbag Entry Floor Triggered on ${mint}! Price retraced to entry (${ratio.toFixed(2)}x). Cashing out remaining 25% bag at breakeven!`);
+
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_ENTRY_FLOOR", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "MOONBAG_ENTRY_FLOOR";
+                        await trade.save();
+                    }
+                    continue;
+                }
+
+                // 5C. Moonbag 30-Min Expiration Timeout: Most coins die within 30m; cash out before volume dries completely
+                if (minutesSinceTP >= 30 && (dropFromPeak <= -0.10 || minutesSinceTP >= 45)) {
+                    console.log(`[TRADE-ENGINE] ⏳ Moonbag 30-Min Expiration Triggered on ${mint}! ${minutesSinceTP.toFixed(1)}m elapsed post-TP. Cashing out remaining 25% bag into SOL before token dies!`);
+
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_TIMEOUT_30M", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "MOONBAG_TIMEOUT_30M";
                         await trade.save();
                     }
                     continue;
@@ -1274,10 +1319,14 @@ class TradeEngine {
                         triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -28% drop)';
                     } else if (source === 'TRAILING_STOP_MOONBAG') {
                         triggerDesc = '🪂 *Moonbag Trailing Stop* (Sold 100% remaining moonbag at -20% from peak)';
+                    } else if (source === 'MOONBAG_ENTRY_FLOOR') {
+                        triggerDesc = '🛡️ *Moonbag Entry Floor* (Retraced to entry price; locked in $0 moonbag loss)';
+                    } else if (source === 'MOONBAG_TIMEOUT_30M') {
+                        triggerDesc = '⏳ *Moonbag 30-Min Expiration* (30m elapsed post-TP; cashed out remaining bag into SOL)';
                     } else if (source === 'WHALE_MIRROR' || source === 'COPY_TRADE') {
                         triggerDesc = '🪞 *Mirrored Whale Exit* (Whale sold ➔ Sold 100%)';
                     } else if (source === 'MANUAL_TELEGRAM' || source === 'MANUAL_PANIC') {
-                        triggerDesc = '⚡ *Manual Admin Execution*';
+                        triggerDesc = '⚡ *Manual Admin Emergency Exit*';
                     } else if (isReentry) {
                         triggerDesc = '🦅 Dip Re-entry Take Profit';
                     }
