@@ -60,6 +60,14 @@ const ActiveTradeSchema = new Schema(
     mirroredWallet: {
       type: String, // If copied from a watched wallet
     },
+    convictionTier: {
+      type: String,
+      default: "STANDARD",
+    },
+    priorityFeePaid: {
+      type: Number,
+      default: 0.0001,
+    },
     gainFactorUsed: {
       type: Number, // Percentage of our balance used
     }

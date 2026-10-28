@@ -1169,6 +1169,11 @@ Control automatic early token discovery (milestone sniper) and customize market 
                             `   • *Position Value:* \`${liveValuationSol.toFixed(4)} SOL\` (~$${(liveValuationSol * solPrice).toFixed(2)}) vs Invested \`${investedSol.toFixed(4)} SOL\` (~$${investedUSD.toFixed(2)})\n` +
                             `   • *Market Cap:* \`${formatMC(currentMC_USD)}\` (Entry: \`${formatMC(entryMC_USD)}\`)\n`;
 
+                    if (t.convictionTier && t.convictionTier !== 'STANDARD') {
+                        const tierLabel = t.convictionTier === 'MASSIVE_CONVICTION' ? '⚡⚡ Massive ($5k+) — 10x Front-Run' : '⚡ Elevated ($2.5k+) — 3x Priority';
+                        text += `   • *Whale Conviction:* \`${tierLabel}\` (Gas: \`${t.priorityFeePaid || 0.0001} SOL\`)\n`;
+                    }
+
                     if (isMoonbag) {
                         const peakSol = t.highestMarketCapPostTP > 0 ? t.highestMarketCapPostTP : (currentMC_Sol > entryMC_Sol ? currentMC_Sol : entryMC_Sol * 1.4);
                         const peakUSD = peakSol * solPrice;

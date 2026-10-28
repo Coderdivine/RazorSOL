@@ -645,7 +645,17 @@ class TradeEngine {
                 await this.updateMyBalance();
                 if (this.myBalance >= 0.0005) {
                     console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Whale sold. Selling ALL (100%) remaining bag...`);
-                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, 0.0001, "WHALE_MIRROR", watchedWallet.walletAddress);
+                    // Dynamic exit priority fee to front-run whale dumping if large volume
+                    let exitPriorityFee = 0.0001;
+                    if (receivedUsd >= 5000) {
+                        exitPriorityFee = 0.0008; // High speed exit on whale dump
+                    } else if (receivedUsd >= 2500) {
+                        exitPriorityFee = 0.0003;
+                    }
+                    // Profit Guard on exit: ensure fee does not exceed available SOL buffer
+                    exitPriorityFee = Number(Math.min(exitPriorityFee, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
+
+                    const sellSig = await this.executeTradeLocal(tradeEvent.mint, "sell", "100%", false, exitPriorityFee, "WHALE_MIRROR", watchedWallet.walletAddress);
                     if (sellSig) {
                         for (let trade of activeTrades) {
                             trade.status = "CLOSED";
@@ -903,8 +913,31 @@ class TradeEngine {
         telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
 
         if (canExecuteBuy) {
-            console.log(`[TRADE-ENGINE] 🎯 QUALIFIED BUY: Whale spent $${spentUSD.toFixed(0)} (> $250) under $500k MC (${mcTracker})! Entering full liquid balance: ${myTradeSize.toFixed(4)} SOL...`);
-            await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, 0.0001, "COPY_TRADE", watchedWallet.walletAddress);
+            // WHALE CONVICTION MULTIPLIER & PROFIT GUARD
+            // Determine target priority fee based on Whale Buy volume:
+            // - Standard ($250 to $2,499): 0.0001 SOL (~$0.015)
+            // - Elevated ($2,500 to $4,999): 0.0003 SOL (~$0.045, 3x faster)
+            // - Massive Conviction (≥ $5,000): 0.0010 SOL (~$0.15, 10x faster) to front-run the copy-bot herd
+            let targetPriorityFee = 0.0001;
+            let convictionTier = 'STANDARD';
+
+            if (spentUSD >= 5000) {
+                targetPriorityFee = 0.0010;
+                convictionTier = 'MASSIVE_CONVICTION';
+            } else if (spentUSD >= 2500) {
+                targetPriorityFee = 0.0003;
+                convictionTier = 'ELEVATED_CONVICTION';
+            }
+
+            // PROFIT GUARD: Protect net trading profit!
+            // Ensure priority fee NEVER exceeds 1.5% of trade capital.
+            // When testing with small balances ($1 - $5 / 0.01 - 0.03 SOL), gas will not eat our profit.
+            // Minimum floor is 0.0001 SOL.
+            const maxSafeGasFee = Math.max(0.0001, myTradeSize * 0.015);
+            const priorityFee = Number(Math.min(targetPriorityFee, maxSafeGasFee).toFixed(5));
+
+            console.log(`[TRADE-ENGINE] 🎯 QUALIFIED BUY: Whale spent $${spentUSD.toFixed(0)} (> $250) under $500k MC (${mcTracker})! Conviction: ${convictionTier} | Priority Fee: ${priorityFee} SOL (Profit Guard Active). Entering full liquid balance: ${myTradeSize.toFixed(4)} SOL...`);
+            await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, priorityFee, "COPY_TRADE", watchedWallet.walletAddress, null, false, convictionTier);
         } else {
             console.log(`[TRADE-ENGINE] ℹ️ Buy trade execution skipped: ${skipReason}`);
         }
@@ -1038,7 +1071,7 @@ class TradeEngine {
         }
     }
 
-    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false) {
+    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD') {
         if(!this.myKeypair) {
             console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
             return null;
@@ -1127,16 +1160,24 @@ class TradeEngine {
                     const tokenData = await this.resolveTokenMetadata(mint);
                     const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
                     const links = getTokenLinks(mint);
-                    const modeDesc = source === 'COPY_TRADE' 
+                    let modeDesc = source === 'COPY_TRADE' 
                         ? `Mirrored Whale [\`${mirroredWallet ? mirroredWallet.substring(0,4)+'...'+mirroredWallet.substring(mirroredWallet.length-4) : 'Whale'}\`](https://solscan.io/account/${mirroredWallet})`
                         : '🔫 5K Milestone Snipe ($10k ➔ $50k)';
+
+                    let convictionDesc = '';
+                    if (convictionTier === 'MASSIVE_CONVICTION') {
+                        convictionDesc = `\n⚡ *Whale Conviction:* 🚀 *Massive ($5,000+)* — 10x Front-Run Fast Track`;
+                    } else if (convictionTier === 'ELEVATED_CONVICTION') {
+                        convictionDesc = `\n⚡ *Whale Conviction:* 🔥 *Elevated ($2,500+)* — 3x Priority`;
+                    }
 
                     const buyAlert =
 `⚡ *RAZOR BOT BUY CONFIRMED* ⚡\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
 `💰 *Buy Size:* \`${amount.toFixed(4)} SOL\`\n` +
-`🎯 *Mode:* ${modeDesc}\n` +
+`🎯 *Mode:* ${modeDesc}${convictionDesc}\n` +
+`⛽ *Priority Fee:* \`${priorityFee} SOL\` (Profit Guard Protected)\n` +
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
@@ -1162,7 +1203,9 @@ class TradeEngine {
                             tokensReceived: 0,
                             status: "OPEN",
                             source,
-                            mirroredWallet
+                            mirroredWallet,
+                            convictionTier,
+                            priorityFeePaid: priorityFee
                         });
                         console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 1.4x TP & -54% SL.`);
                         
