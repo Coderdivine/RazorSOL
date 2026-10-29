@@ -309,7 +309,13 @@ class TradeEngine {
         
         // 3. Evaluate if we have an active position (TP/SL)
         if(mint && mc) {
-            await this.evaluateActiveTrades(mint, mc);
+            if (!this.lastEvalByMint) this.lastEvalByMint = new Map();
+            const now = Date.now();
+            const lastTime = this.lastEvalByMint.get(mint) || 0;
+            if (now - lastTime >= 2000) { // Throttle evaluations to once every 2 seconds per mint to prevent micro-tick storms
+                this.lastEvalByMint.set(mint, now);
+                await this.evaluateActiveTrades(mint, mc);
+            }
         }
     }
 
@@ -700,7 +706,8 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
+        // Whale sells are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
+        telegramService.sendAlert(cleanAlertMsg, null, tradeEvent.mint);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -926,7 +933,8 @@ class TradeEngine {
 `📈 *Current MC:* ${mcTracker}\n\n` +
 `${links.footerButtons}`;
 
-        telegramService.sendAlert(cleanAlertMsg, cleanAlertMsg, tradeEvent.mint);
+        // Whale sells are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
+        telegramService.sendAlert(cleanAlertMsg, null, tradeEvent.mint);
 
         if (canExecuteBuy) {
             // WHALE CONVICTION MULTIPLIER & PROFIT GUARD
@@ -1004,6 +1012,8 @@ class TradeEngine {
     async evaluateActiveTrades(mint, currentMC) {
         if (!mint || !currentMC || currentMC <= 0) return;
 
+        if (!this.tradeExecutionLocks) this.tradeExecutionLocks = new Set();
+
         const solPrice = solanaService.getSolPriceUSD() || 150;
         const currentMC_USD = currentMC * solPrice;
 
@@ -1013,6 +1023,12 @@ class TradeEngine {
         });
         
         for (let trade of activeTrades) {
+            const tradeIdStr = trade._id.toString();
+            // In-flight mutex: if this trade is already executing an order on-chain, skip to prevent duplicate concurrent transactions
+            if (this.tradeExecutionLocks.has(tradeIdStr)) {
+                continue;
+            }
+
             // Ensure entryMarketCap is valid
             if (!trade.entryMarketCap || trade.entryMarketCap <= 0) {
                 if (trade.entryMarketCapUSD && trade.entryMarketCapUSD > 0) {
@@ -1036,22 +1052,24 @@ class TradeEngine {
             }
 
             // RULE 1: HARD STOP LOSS AT -28% DROP FROM ENTRY -> SELL OFF 100%
-            // Tightened from -54% to -28% so 1 winning trade (+40% TP) completely recovers 1 loss!
             if (ratio <= 0.72 || pnlPercent <= -28) {
                 console.log(`[TRADE-ENGINE] 🛑 Tight Stop Loss (-28%) Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${pnlPercent.toFixed(1)}%. Executing 100% SELL OFF!`);
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_28", null, trade._id);
-                if (sellSig) {
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "STOP_LOSS_28";
-                    await trade.save();
+                this.tradeExecutionLocks.add(tradeIdStr);
+                trade.status = "CLOSED";
+                trade.closedAt = new Date();
+                trade.closeReason = "STOP_LOSS_28";
+                await trade.save();
+
+                try {
+                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_28", null, trade._id);
+                } finally {
+                    this.tradeExecutionLocks.delete(tradeIdStr);
                 }
                 continue;
             }
 
             // RULE 2: BREAKEVEN GUARD (ARM AT +20%, EXIT AT ENTRY PRICE / $0 LOSS)
-            // Once coin pumps to +20%, lock in $0 loss protection. If it retraces to entry (<= 1.00x), exit 100%!
             if (trade.status === "OPEN") {
                 if (!trade.isBreakevenArmed && (ratio >= 1.20 || pnlPercent >= 20)) {
                     trade.isBreakevenArmed = true;
@@ -1062,43 +1080,53 @@ class TradeEngine {
                 if (trade.isBreakevenArmed && ratio <= 1.00) {
                     console.log(`[TRADE-ENGINE] 🛡️ Breakeven Stop Triggered on ${mint}! Peaked at +${(((trade.highestRatioSeen || 1.2) - 1) * 100).toFixed(1)}%, now retraced to entry price (${ratio.toFixed(2)}x). Exiting 100% to guarantee $0 LOSS!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "BREAKEVEN_STOP", null, trade._id);
-                    if (sellSig) {
-                        trade.status = "CLOSED";
-                        trade.closedAt = new Date();
-                        trade.closeReason = "BREAKEVEN_STOP";
-                        await trade.save();
+                    this.tradeExecutionLocks.add(tradeIdStr);
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "BREAKEVEN_STOP";
+                    await trade.save();
+
+                    try {
+                        await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "BREAKEVEN_STOP", null, trade._id);
+                    } finally {
+                        this.tradeExecutionLocks.delete(tradeIdStr);
                     }
                     continue;
                 }
             }
 
             // RULE 3: 15-MINUTE STAGNATION / DEAD TRADE TIMEOUT
-            // If open for >= 15 minutes and token is in the red (<= -15%) with zero momentum, cut early!
             if (trade.status === "OPEN" && tradeAgeMinutes >= 15 && (ratio <= 0.85 || pnlPercent <= -15)) {
                 console.log(`[TRADE-ENGINE] ⏳ 15-Min Stagnation Guard Triggered on ${mint}! Open for ${tradeAgeMinutes.toFixed(1)}m | PnL: ${pnlPercent.toFixed(1)}%. Zero momentum. Cutting trade early to protect remaining ${(ratio * 100).toFixed(0)}% capital!`);
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TIMEOUT_STAGNANT_15M", null, trade._id);
-                if (sellSig) {
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "TIMEOUT_STAGNANT_15M";
-                    await trade.save();
+                this.tradeExecutionLocks.add(tradeIdStr);
+                trade.status = "CLOSED";
+                trade.closedAt = new Date();
+                trade.closeReason = "TIMEOUT_STAGNANT_15M";
+                await trade.save();
+
+                try {
+                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TIMEOUT_STAGNANT_15M", null, trade._id);
+                } finally {
+                    this.tradeExecutionLocks.delete(tradeIdStr);
                 }
                 continue;
             }
 
             // RULE 4: TAKE PROFIT AT 1.4x GAIN -> SELL 75%, HOLD REMAINING 25% TO CAPTURE MOONSHOT
-            // If price surges directly to 5.0x (+400%) while OPEN, exit 100% immediately!
             if (ratio >= 5.0 && trade.status === "OPEN") {
                 console.log(`[TRADE-ENGINE] 🚀 5x Moonshot Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% full bag!`);
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0005, "MAX_TP_5X", null, trade._id);
-                if (sellSig) {
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "MAX_TP_5X";
-                    await trade.save();
+                this.tradeExecutionLocks.add(tradeIdStr);
+                trade.status = "CLOSED";
+                trade.closedAt = new Date();
+                trade.closeReason = "MAX_TP_5X";
+                await trade.save();
+
+                try {
+                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0005, "MAX_TP_5X", null, trade._id);
+                } finally {
+                    this.tradeExecutionLocks.delete(tradeIdStr);
                 }
                 continue;
             }
@@ -1106,18 +1134,22 @@ class TradeEngine {
             if (ratio >= 1.4 && trade.status === "OPEN") {
                 console.log(`[TRADE-ENGINE] 💸 1.4x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
 
-                const sellSig = await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_1_4X", null, trade._id);
-                if (sellSig) {
-                    trade.status = "PARTIAL_TP_1_4X";
-                    trade.tp14xExecutedAt = new Date();
-                    trade.highestMarketCapPostTP = currentMC;
-                    await trade.save();
+                this.tradeExecutionLocks.add(tradeIdStr);
+                // Mark PARTIAL_TP_1_4X IMMEDIATELY in DB so concurrent WebSocket ticks NEVER re-trigger 1.4x TP
+                trade.status = "PARTIAL_TP_1_4X";
+                trade.tp14xExecutedAt = new Date();
+                trade.highestMarketCapPostTP = currentMC;
+                await trade.save();
+
+                try {
+                    await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_1_4X", null, trade._id);
+                } finally {
+                    this.tradeExecutionLocks.delete(tradeIdStr);
                 }
                 continue;
             }
 
             // RULE 5: ADVANCED MOONBAG LIFECYCLE (25% HOLDING PHASE)
-            // "Let the max be 5x for now."
             if (trade.status === "PARTIAL_TP_1_4X" || trade.status === "PARTIAL_TP_2X") {
                 if (!trade.highestMarketCapPostTP || trade.highestMarketCapPostTP <= 0) {
                     trade.highestMarketCapPostTP = currentMC;
@@ -1135,17 +1167,20 @@ class TradeEngine {
 
                 const moonbagExitFee = Number(Math.min(0.0005, Math.max(0.0001, this.myBalance - 0.0004)).toFixed(5));
 
-                // 5A. Max 5x Hard Take Profit Cap: "Let the max be 5x for now"
-                // If moonbag surges to 5.0x (+400%), cash out 100% of remaining moonbag immediately!
+                // 5A. Max 5x Hard Take Profit Cap
                 if (ratio >= 5.0 || pnlPercent >= 400) {
                     console.log(`[TRADE-ENGINE] 🚀 5x Moonbag Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% of moonbag to lock in 5x win!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_MAX_TP_5X", null, trade._id);
-                    if (sellSig) {
-                        trade.status = "CLOSED";
-                        trade.closedAt = new Date();
-                        trade.closeReason = "MOONBAG_MAX_TP_5X";
-                        await trade.save();
+                    this.tradeExecutionLocks.add(tradeIdStr);
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "MOONBAG_MAX_TP_5X";
+                    await trade.save();
+
+                    try {
+                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_MAX_TP_5X", null, trade._id);
+                    } finally {
+                        this.tradeExecutionLocks.delete(tradeIdStr);
                     }
                     continue;
                 }
@@ -1154,12 +1189,16 @@ class TradeEngine {
                 if (dropFromPeak <= -0.20) {
                     console.log(`[TRADE-ENGINE] 🛑 Moonbag Trailing Stop (-20%) Triggered on ${mint}! Peak: ${trade.highestMarketCapPostTP.toFixed(2)} SOL ($${(trade.highestMarketCapPostTP * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${(dropFromPeak * 100).toFixed(1)}%. Selling remaining 25% moonbag!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "TRAILING_STOP_MOONBAG", null, trade._id);
-                    if (sellSig) {
-                        trade.status = "CLOSED";
-                        trade.closedAt = new Date();
-                        trade.closeReason = "TRAILING_STOP_MOONBAG";
-                        await trade.save();
+                    this.tradeExecutionLocks.add(tradeIdStr);
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "TRAILING_STOP_MOONBAG";
+                    await trade.save();
+
+                    try {
+                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "TRAILING_STOP_MOONBAG", null, trade._id);
+                    } finally {
+                        this.tradeExecutionLocks.delete(tradeIdStr);
                     }
                     continue;
                 }
@@ -1168,26 +1207,34 @@ class TradeEngine {
                 if (ratio <= 1.00) {
                     console.log(`[TRADE-ENGINE] 🛡️ Moonbag Entry Floor Triggered on ${mint}! Price retraced to entry (${ratio.toFixed(2)}x). Cashing out remaining 25% bag at breakeven!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_ENTRY_FLOOR", null, trade._id);
-                    if (sellSig) {
-                        trade.status = "CLOSED";
-                        trade.closedAt = new Date();
-                        trade.closeReason = "MOONBAG_ENTRY_FLOOR";
-                        await trade.save();
+                    this.tradeExecutionLocks.add(tradeIdStr);
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "MOONBAG_ENTRY_FLOOR";
+                    await trade.save();
+
+                    try {
+                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_ENTRY_FLOOR", null, trade._id);
+                    } finally {
+                        this.tradeExecutionLocks.delete(tradeIdStr);
                     }
                     continue;
                 }
 
-                // 5D. Moonbag 30-Min Expiration Timeout: Most coins die within 30m; cash out before volume dries completely
+                // 5D. Moonbag 30-Min Expiration Timeout
                 if (minutesSinceTP >= 30 && (dropFromPeak <= -0.10 || minutesSinceTP >= 45)) {
                     console.log(`[TRADE-ENGINE] ⏳ Moonbag 30-Min Expiration Triggered on ${mint}! ${minutesSinceTP.toFixed(1)}m elapsed post-TP. Cashing out remaining 25% bag into SOL before token dies!`);
 
-                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_TIMEOUT_30M", null, trade._id);
-                    if (sellSig) {
-                        trade.status = "CLOSED";
-                        trade.closedAt = new Date();
-                        trade.closeReason = "MOONBAG_TIMEOUT_30M";
-                        await trade.save();
+                    this.tradeExecutionLocks.add(tradeIdStr);
+                    trade.status = "CLOSED";
+                    trade.closedAt = new Date();
+                    trade.closeReason = "MOONBAG_TIMEOUT_30M";
+                    await trade.save();
+
+                    try {
+                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_TIMEOUT_30M", null, trade._id);
+                    } finally {
+                        this.tradeExecutionLocks.delete(tradeIdStr);
                     }
                     continue;
                 }
@@ -1209,6 +1256,28 @@ class TradeEngine {
         if (action === "sell" && this.myBalance < 0.0005) {
             console.log(`[TRADE-ENGINE] ℹ️ Insufficient balance for network gas fee (${this.myBalance.toFixed(4)} SOL). Skipping sell broadcast for ${mint}.`);
             return null;
+        }
+
+        // On-chain token balance verification: Never broadcast a sell if wallet has already liquidated the token
+        if (action === "sell") {
+            try {
+                const tokenBal = await solanaService.getTokenBalance(this.myWalletKey, mint);
+                if (tokenBal <= 0) {
+                    console.log(`[TRADE-ENGINE] ℹ️ Zero token balance on-chain for ${mint}. Token already liquidated; skipping redundant sell broadcast.`);
+                    if (tradeId) {
+                        const trade = await ActiveTrade.findById(tradeId);
+                        if (trade && trade.status !== "CLOSED") {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = source;
+                            await trade.save();
+                        }
+                    }
+                    return null;
+                }
+            } catch (balErr) {
+                // Non-blocking fallback
+            }
         }
         
         try {
@@ -1310,7 +1379,8 @@ class TradeEngine {
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
-                    telegramService.sendAlert(buyAlert, null, mint);
+                    // RAZOR BOT BUY CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
+                    telegramService.sendAlert(buyAlert, buyAlert, mint);
 
                     if(isReentry && tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
@@ -1381,7 +1451,17 @@ class TradeEngine {
 `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
 `${links.footerButtons}`;
 
-                    telegramService.sendAlert(sellAlert, null, mint);
+                    // RAZOR BOT SELL CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
+                    // Alert deduplication: Suppress duplicate alerts for the same token and exit trigger within 45 seconds
+                    if (!this.recentAlertsCache) this.recentAlertsCache = new Set();
+                    const alertKey = `${mint}_${source}`;
+                    if (!this.recentAlertsCache.has(alertKey)) {
+                        this.recentAlertsCache.add(alertKey);
+                        setTimeout(() => this.recentAlertsCache.delete(alertKey), 45000);
+                        telegramService.sendAlert(sellAlert, sellAlert, mint);
+                    } else {
+                        console.log(`[TRADE-ENGINE] ℹ️ Suppressed duplicate Telegram sell alert for ${alertKey}`);
+                    }
 
                     if(tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);

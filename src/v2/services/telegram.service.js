@@ -2260,42 +2260,9 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         if (!this.bot) return;
 
         const adminMsg = adminMessage;
-        const groupMsg = groupMessage || adminMessage;
-
-        // Auto-extract mint from CA line if not explicitly passed
-        let targetMint = mint;
-        if (!targetMint) {
-            const match = adminMsg.match(/🏷️ \*CA:\* `([1-9A-HJ-NP-Za-km-z]{32,44})`/);
-            if (match) targetMint = match[1];
-        }
-
-        let groupMarkup = null;
-        let adminMarkup = null;
-
-        if (targetMint) {
-            // Group channel gets external links only (clean for subscribers)
-            groupMarkup = Markup.inlineKeyboard([
-                [
-                    Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
-                    Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`),
-                    Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`)
-                ]
-            ]).reply_markup;
-
-            // Admin private chat gets interactive 1-tap trade control buttons + links
-            adminMarkup = Markup.inlineKeyboard([
-                [
-                    Markup.button.callback('🔴 Sell 100%', `action_sell_100:${targetMint}`),
-                    Markup.button.callback('🟡 Sell 50%', `action_sell_50:${targetMint}`),
-                    Markup.button.callback('🟢 Buy More', `action_buy_more:${targetMint}`)
-                ],
-                [
-                    Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
-                    Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`),
-                    Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`)
-                ]
-            ]).reply_markup;
-        }
+        // Group message is ONLY sent when explicitly provided (e.g., BUY/SELL CONFIRMED).
+        // Whale tracking and private internal alerts pass groupMessage = null and MUST NEVER be sent to the public channel.
+        const groupMsg = groupMessage || null;
 
         // 1. Identify VIP channel (Group destination for prospects/subscribers)
         let vipChannelId = null;
@@ -2318,24 +2285,30 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         const adminTargets = new Set();
         const groupTargets = new Set();
 
-        // The VIP group / channel gets groupMsg (where private whale wallet links are masked)
+        // The VIP group / channel (IDs starting with -)
         if (vipChannelId) {
             groupTargets.add(vipChannelId);
         }
 
-        // Admin private chat gets adminMsg (full details, whale Solscan links, PnL)
+        // Admin private chat (positive user ID)
         if (adminChatId && (!vipChannelId || adminChatId !== vipChannelId)) {
-            adminTargets.add(adminChatId);
+            if (adminChatId.startsWith('-')) {
+                groupTargets.add(adminChatId);
+            } else {
+                adminTargets.add(adminChatId);
+            }
         }
 
-        // Wallets addedBy (admin who typed /watch in private chat or bot)
+        // Wallets addedBy (admin who typed /watch in private chat)
         try {
             const wallets = await WatchedWallet.find({ isActive: true });
             wallets.forEach(w => {
                 if (w.addedBy && w.addedBy !== 'unknown' && w.addedBy !== 'inline') {
                     const id = String(w.addedBy);
-                    if (!vipChannelId || id !== vipChannelId) {
+                    if (!id.startsWith('-')) {
                         adminTargets.add(id);
+                    } else {
+                        groupTargets.add(id);
                     }
                 }
             });
@@ -2347,7 +2320,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
             members.forEach(m => {
                 if (m.addedByAdmin && m.addedByAdmin !== 'admin' && m.addedByAdmin !== 'unknown') {
                     const id = String(m.addedByAdmin);
-                    if (!vipChannelId || id !== vipChannelId) {
+                    if (!id.startsWith('-')) {
                         adminTargets.add(id);
                     }
                 }
@@ -2360,7 +2333,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         if (envAlertChannel && String(envAlertChannel) !== '-1003985019043') {
             const id = String(envAlertChannel);
-            if (vipChannelId && id === vipChannelId) {
+            if (id.startsWith('-')) {
                 groupTargets.add(id);
             } else {
                 adminTargets.add(id);
@@ -2369,7 +2342,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         if (cfgAlertChannel && String(cfgAlertChannel) !== '-1003985019043') {
             const id = String(cfgAlertChannel);
-            if (vipChannelId && id === vipChannelId) {
+            if (id.startsWith('-')) {
                 groupTargets.add(id);
             } else {
                 adminTargets.add(id);
@@ -2383,13 +2356,12 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         console.log(`[TELEGRAM] 📤 Dispatching alert ➔ Admin Targets (${adminTargets.size}): [${[...adminTargets].join(', ')}], Group Targets (${groupTargets.size}): [${[...groupTargets].join(', ')}]`);
 
-        // Send full details to Admin
+        // Send full details to Admin (Private DM only) - Clean text with markdown links, no messy buttons
         for (const targetId of adminTargets) {
             const sendOpts = {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             };
-            if (adminMarkup) sendOpts.reply_markup = adminMarkup;
 
             try {
                 await this.bot.telegram.sendMessage(targetId, adminMsg, sendOpts);
@@ -2397,8 +2369,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = adminMsg.replace(/[*_`\[\]()]/g, '');
-                        const fallbackOpts = adminMarkup ? { reply_markup: adminMarkup } : {};
-                        await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
+                        await this.bot.telegram.sendMessage(targetId, plainText);
                     } catch {}
                 } else {
                     console.warn(`[TELEGRAM] ⚠️ Admin alert dispatch notice for ${targetId}:`, err.message);
@@ -2406,25 +2377,25 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
             }
         }
 
-        // Send to Group
-        for (const targetId of groupTargets) {
-            const sendOpts = {
-                parse_mode: 'Markdown',
-                disable_web_page_preview: true
-            };
-            if (groupMarkup) sendOpts.reply_markup = groupMarkup;
+        // Send to Group/Channel ONLY if groupMsg is explicitly provided (BUY & SELL confirmed trades only!)
+        if (groupMsg && groupTargets.size > 0) {
+            for (const targetId of groupTargets) {
+                const sendOpts = {
+                    parse_mode: 'Markdown',
+                    disable_web_page_preview: true
+                };
 
-            try {
-                await this.bot.telegram.sendMessage(targetId, groupMsg, sendOpts);
-            } catch (err) {
-                if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
-                    try {
-                        const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
-                        const fallbackOpts = groupMarkup ? { reply_markup: groupMarkup } : {};
-                        await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
-                    } catch {}
-                } else {
-                    console.warn(`[TELEGRAM] ⚠️ Group alert dispatch notice for ${targetId}:`, err.message);
+                try {
+                    await this.bot.telegram.sendMessage(targetId, groupMsg, sendOpts);
+                } catch (err) {
+                    if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
+                        try {
+                            const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
+                            await this.bot.telegram.sendMessage(targetId, plainText);
+                        } catch {}
+                    } else {
+                        console.warn(`[TELEGRAM] ⚠️ Group alert dispatch notice for ${targetId}:`, err.message);
+                    }
                 }
             }
         }
