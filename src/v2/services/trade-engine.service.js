@@ -1282,6 +1282,29 @@ class TradeEngine {
         }
     }
 
+    async checkBondingCurveStatus(mint) {
+        if (!mint || typeof mint !== 'string' || !mint.endsWith('pump')) {
+            return { exists: false, isComplete: false };
+        }
+        try {
+            const pub = new PublicKey(mint);
+            const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+            const [bondingCurve] = PublicKey.findProgramAddressSync(
+                [Buffer.from('bonding-curve'), pub.toBuffer()],
+                PUMP_PROGRAM
+            );
+            const acc = await solanaService.connection.getAccountInfo(bondingCurve);
+            if (!acc || !acc.data || acc.data.length < 49) {
+                return { exists: false, isComplete: false };
+            }
+            // Byte at offset 48 is the Anchor 'complete' boolean flag
+            const isComplete = acc.data.readUInt8(48) === 1;
+            return { exists: true, isComplete };
+        } catch {
+            return { exists: false, isComplete: false };
+        }
+    }
+
     async confirmTransactionSafe(signature, maxWaitMs = 15000) {
         if (!signature || typeof signature !== 'string') return { confirmed: false, err: 'INVALID_SIGNATURE' };
         const start = Date.now();
@@ -1325,7 +1348,7 @@ class TradeEngine {
         return { confirmed: false, err: 'TIMEOUT_NOT_CONFIRMED' };
     }
 
-    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD') {
+    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD', forcePool = null) {
         if(!this.myKeypair) {
             console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
             return null;
@@ -1364,7 +1387,19 @@ class TradeEngine {
         }
         
         try {
-            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} (${amount}) payload to PumpPortal for ${mint}`);
+            // Determine pool: check on-chain if bonding curve is complete to route to pump-amm (Raydium) directly
+            let targetPool = forcePool || "auto";
+            if (!forcePool && mint && mint.endsWith('pump')) {
+                try {
+                    const curve = await this.checkBondingCurveStatus(mint);
+                    if (curve && curve.isComplete) {
+                        targetPool = "pump-amm";
+                        console.log(`[TRADE-ENGINE] 🎓 Token ${mint} completed bonding curve on-chain. Routing ${action.toUpperCase()} to PumpSwap/Raydium AMM pool!`);
+                    }
+                } catch {}
+            }
+
+            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} (${amount}) payload to PumpPortal for ${mint} [Pool: ${targetPool}]`);
             const response = await axios.post("https://pumpportal.fun/api/trade-local", {
                 publicKey: this.myWalletKey,
                 action,
@@ -1373,7 +1408,7 @@ class TradeEngine {
                 denominatedInSol: denominatedInSol ? "true" : "false",
                 slippage: action === "sell" ? 40 : 35,
                 priorityFee,
-                pool: "auto"
+                pool: targetPool
             }, {
                 responseType: 'arraybuffer'
             });
@@ -1439,7 +1474,16 @@ class TradeEngine {
                 // Verify on-chain execution with getSignatureStatus before recording ActiveTrade or dispatching Telegram alert.
                 const confirmation = await this.confirmTransactionSafe(signature);
                 if (!confirmation.confirmed) {
-                    console.error(`[TRADE-ENGINE] ❌ Transaction ${signature} failed on-chain or was dropped (${JSON.stringify(confirmation.err)}). Suppressing confirmed alert.`);
+                    const errStr = JSON.stringify(confirmation.err || '');
+                    console.error(`[TRADE-ENGINE] ❌ Transaction ${signature} failed on-chain or was dropped (${errStr}). Suppressing confirmed alert.`);
+
+                    // If error is Custom: 6005 (BondingCurveComplete), token graduated right as trade was being processed.
+                    // Automatically retry once targeting the migrated AMM pool (pump-amm):
+                    if (errStr.includes('6005') && targetPool !== 'pump-amm') {
+                        console.log(`[TRADE-ENGINE] 🔄 Token completed bonding curve mid-flight. Automatically retrying ${action.toUpperCase()} on pump-amm pool...`);
+                        return await this.executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet, tradeId, isReentry, convictionTier, 'pump-amm');
+                    }
+
                     if (action === "buy") {
                         console.warn(`[TRADE-ENGINE] 🛑 BUY transaction did not execute on-chain. ActiveTrade NOT created.`);
                     }
