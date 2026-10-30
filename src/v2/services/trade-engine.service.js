@@ -1056,13 +1056,16 @@ class TradeEngine {
                 console.log(`[TRADE-ENGINE] 🛑 Tight Stop Loss (-28%) Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${pnlPercent.toFixed(1)}%. Executing 100% SELL OFF!`);
 
                 this.tradeExecutionLocks.add(tradeIdStr);
-                trade.status = "CLOSED";
-                trade.closedAt = new Date();
-                trade.closeReason = "STOP_LOSS_28";
-                await trade.save();
-
                 try {
-                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_28", null, trade._id);
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "STOP_LOSS_28", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "STOP_LOSS_28";
+                        await trade.save();
+                    } else {
+                        console.warn(`[TRADE-ENGINE] ⚠️ Stop loss sell for ${mint} unconfirmed on-chain. Trade remains active.`);
+                    }
                 } finally {
                     this.tradeExecutionLocks.delete(tradeIdStr);
                 }
@@ -1081,13 +1084,16 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] 🛡️ Breakeven Stop Triggered on ${mint}! Peaked at +${(((trade.highestRatioSeen || 1.2) - 1) * 100).toFixed(1)}%, now retraced to entry price (${ratio.toFixed(2)}x). Exiting 100% to guarantee $0 LOSS!`);
 
                     this.tradeExecutionLocks.add(tradeIdStr);
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "BREAKEVEN_STOP";
-                    await trade.save();
-
                     try {
-                        await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "BREAKEVEN_STOP", null, trade._id);
+                        const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "BREAKEVEN_STOP", null, trade._id);
+                        if (sellSig) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "BREAKEVEN_STOP";
+                            await trade.save();
+                        } else {
+                            console.warn(`[TRADE-ENGINE] ⚠️ Breakeven stop sell for ${mint} unconfirmed on-chain. Trade remains active.`);
+                        }
                     } finally {
                         this.tradeExecutionLocks.delete(tradeIdStr);
                     }
@@ -1100,13 +1106,16 @@ class TradeEngine {
                 console.log(`[TRADE-ENGINE] ⏳ 15-Min Stagnation Guard Triggered on ${mint}! Open for ${tradeAgeMinutes.toFixed(1)}m | PnL: ${pnlPercent.toFixed(1)}%. Zero momentum. Cutting trade early to protect remaining ${(ratio * 100).toFixed(0)}% capital!`);
 
                 this.tradeExecutionLocks.add(tradeIdStr);
-                trade.status = "CLOSED";
-                trade.closedAt = new Date();
-                trade.closeReason = "TIMEOUT_STAGNANT_15M";
-                await trade.save();
-
                 try {
-                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TIMEOUT_STAGNANT_15M", null, trade._id);
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0001, "TIMEOUT_STAGNANT_15M", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "TIMEOUT_STAGNANT_15M";
+                        await trade.save();
+                    } else {
+                        console.warn(`[TRADE-ENGINE] ⚠️ Stagnation sell for ${mint} unconfirmed on-chain. Trade remains active.`);
+                    }
                 } finally {
                     this.tradeExecutionLocks.delete(tradeIdStr);
                 }
@@ -1118,13 +1127,16 @@ class TradeEngine {
                 console.log(`[TRADE-ENGINE] 🚀 5x Moonshot Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% full bag!`);
 
                 this.tradeExecutionLocks.add(tradeIdStr);
-                trade.status = "CLOSED";
-                trade.closedAt = new Date();
-                trade.closeReason = "MAX_TP_5X";
-                await trade.save();
-
                 try {
-                    await this.executeTradeLocal(mint, "sell", "100%", false, 0.0005, "MAX_TP_5X", null, trade._id);
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, 0.0005, "MAX_TP_5X", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "CLOSED";
+                        trade.closedAt = new Date();
+                        trade.closeReason = "MAX_TP_5X";
+                        await trade.save();
+                    } else {
+                        console.warn(`[TRADE-ENGINE] ⚠️ 5x TP sell for ${mint} unconfirmed on-chain. Trade remains active.`);
+                    }
                 } finally {
                     this.tradeExecutionLocks.delete(tradeIdStr);
                 }
@@ -1135,14 +1147,16 @@ class TradeEngine {
                 console.log(`[TRADE-ENGINE] 💸 1.4x Take Profit Triggered on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Selling 75%, retaining 25% moonbag!`);
 
                 this.tradeExecutionLocks.add(tradeIdStr);
-                // Mark PARTIAL_TP_1_4X IMMEDIATELY in DB so concurrent WebSocket ticks NEVER re-trigger 1.4x TP
-                trade.status = "PARTIAL_TP_1_4X";
-                trade.tp14xExecutedAt = new Date();
-                trade.highestMarketCapPostTP = currentMC;
-                await trade.save();
-
                 try {
-                    await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_1_4X", null, trade._id);
+                    const sellSig = await this.executeTradeLocal(mint, "sell", "75%", false, 0.0001, "TAKE_PROFIT_1_4X", null, trade._id);
+                    if (sellSig) {
+                        trade.status = "PARTIAL_TP_1_4X";
+                        trade.tp14xExecutedAt = new Date();
+                        trade.highestMarketCapPostTP = currentMC;
+                        await trade.save();
+                    } else {
+                        console.warn(`[TRADE-ENGINE] ⚠️ 1.4x TP sell for ${mint} unconfirmed on-chain. Status remains OPEN.`);
+                    }
                 } finally {
                     this.tradeExecutionLocks.delete(tradeIdStr);
                 }
@@ -1172,13 +1186,16 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] 🚀 5x Moonbag Target Reached on ${mint}! Entry: ${entryMC.toFixed(2)} SOL ($${(entryMC * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Gain: +${pnlPercent.toFixed(1)}% (${ratio.toFixed(2)}x). Cashing out 100% of moonbag to lock in 5x win!`);
 
                     this.tradeExecutionLocks.add(tradeIdStr);
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "MOONBAG_MAX_TP_5X";
-                    await trade.save();
-
                     try {
-                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_MAX_TP_5X", null, trade._id);
+                        const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_MAX_TP_5X", null, trade._id);
+                        if (sellSig) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "MOONBAG_MAX_TP_5X";
+                            await trade.save();
+                        } else {
+                            console.warn(`[TRADE-ENGINE] ⚠️ Moonbag 5x sell for ${mint} unconfirmed on-chain. Moonbag remains active.`);
+                        }
                     } finally {
                         this.tradeExecutionLocks.delete(tradeIdStr);
                     }
@@ -1190,13 +1207,16 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] 🛑 Moonbag Trailing Stop (-20%) Triggered on ${mint}! Peak: ${trade.highestMarketCapPostTP.toFixed(2)} SOL ($${(trade.highestMarketCapPostTP * solPrice).toFixed(0)}) | Current: ${currentMC.toFixed(2)} SOL ($${currentMC_USD.toFixed(0)}) | Drop: ${(dropFromPeak * 100).toFixed(1)}%. Selling remaining 25% moonbag!`);
 
                     this.tradeExecutionLocks.add(tradeIdStr);
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "TRAILING_STOP_MOONBAG";
-                    await trade.save();
-
                     try {
-                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "TRAILING_STOP_MOONBAG", null, trade._id);
+                        const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "TRAILING_STOP_MOONBAG", null, trade._id);
+                        if (sellSig) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "TRAILING_STOP_MOONBAG";
+                            await trade.save();
+                        } else {
+                            console.warn(`[TRADE-ENGINE] ⚠️ Moonbag trailing stop sell for ${mint} unconfirmed on-chain. Moonbag remains active.`);
+                        }
                     } finally {
                         this.tradeExecutionLocks.delete(tradeIdStr);
                     }
@@ -1208,13 +1228,16 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] 🛡️ Moonbag Entry Floor Triggered on ${mint}! Price retraced to entry (${ratio.toFixed(2)}x). Cashing out remaining 25% bag at breakeven!`);
 
                     this.tradeExecutionLocks.add(tradeIdStr);
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "MOONBAG_ENTRY_FLOOR";
-                    await trade.save();
-
                     try {
-                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_ENTRY_FLOOR", null, trade._id);
+                        const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_ENTRY_FLOOR", null, trade._id);
+                        if (sellSig) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "MOONBAG_ENTRY_FLOOR";
+                            await trade.save();
+                        } else {
+                            console.warn(`[TRADE-ENGINE] ⚠️ Moonbag floor sell for ${mint} unconfirmed on-chain. Moonbag remains active.`);
+                        }
                     } finally {
                         this.tradeExecutionLocks.delete(tradeIdStr);
                     }
@@ -1226,13 +1249,16 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] ⏳ Moonbag 30-Min Expiration Triggered on ${mint}! ${minutesSinceTP.toFixed(1)}m elapsed post-TP. Cashing out remaining 25% bag into SOL before token dies!`);
 
                     this.tradeExecutionLocks.add(tradeIdStr);
-                    trade.status = "CLOSED";
-                    trade.closedAt = new Date();
-                    trade.closeReason = "MOONBAG_TIMEOUT_30M";
-                    await trade.save();
-
                     try {
-                        await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_TIMEOUT_30M", null, trade._id);
+                        const sellSig = await this.executeTradeLocal(mint, "sell", "100%", false, moonbagExitFee, "MOONBAG_TIMEOUT_30M", null, trade._id);
+                        if (sellSig) {
+                            trade.status = "CLOSED";
+                            trade.closedAt = new Date();
+                            trade.closeReason = "MOONBAG_TIMEOUT_30M";
+                            await trade.save();
+                        } else {
+                            console.warn(`[TRADE-ENGINE] ⚠️ Moonbag timeout sell for ${mint} unconfirmed on-chain. Moonbag remains active.`);
+                        }
                     } finally {
                         this.tradeExecutionLocks.delete(tradeIdStr);
                     }
@@ -1240,6 +1266,49 @@ class TradeEngine {
                 }
             }
         }
+    }
+
+    async confirmTransactionSafe(signature, maxWaitMs = 15000) {
+        if (!signature || typeof signature !== 'string') return { confirmed: false, err: 'INVALID_SIGNATURE' };
+        const start = Date.now();
+        console.log(`[TRADE-ENGINE] ⏳ Verifying on-chain confirmation for ${signature.substring(0, 8)}...`);
+        
+        while (Date.now() - start < maxWaitMs) {
+            try {
+                const statusRes = await solanaService.connection.getSignatureStatus(signature, {
+                    searchTransactionHistory: true
+                });
+                const status = statusRes?.value;
+                if (status) {
+                    if (status.err) {
+                        console.error(`[TRADE-ENGINE] ❌ Transaction failed on-chain! Error:`, JSON.stringify(status.err));
+                        return { confirmed: false, err: status.err };
+                    }
+                    if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
+                        console.log(`[TRADE-ENGINE] 🎯 Transaction CONFIRMED on-chain! Status: ${status.confirmationStatus}`);
+                        return { confirmed: true, err: null };
+                    }
+                }
+            } catch (pollErr) {
+                // Non-blocking poll retry
+            }
+            await new Promise(r => setTimeout(r, 1200));
+        }
+
+        // Final failover check via parsed transaction
+        try {
+            const tx = await solanaService.fetchParsedTransactionSafe(signature);
+            if (tx && tx.meta) {
+                if (tx.meta.err) {
+                    console.error(`[TRADE-ENGINE] ❌ Transaction failed on-chain! Error:`, JSON.stringify(tx.meta.err));
+                    return { confirmed: false, err: tx.meta.err };
+                }
+                return { confirmed: true, err: null };
+            }
+        } catch {}
+
+        console.warn(`[TRADE-ENGINE] ⚠️ Transaction ${signature.substring(0, 8)}... not confirmed within timeout. Treating as unconfirmed.`);
+        return { confirmed: false, err: 'TIMEOUT_NOT_CONFIRMED' };
     }
 
     async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD') {
@@ -1288,7 +1357,7 @@ class TradeEngine {
                 mint,
                 amount,
                 denominatedInSol: denominatedInSol ? "true" : "false",
-                slippage: 25,
+                slippage: action === "sell" ? 40 : 35,
                 priorityFee,
                 pool: "auto"
             }, {
@@ -1346,11 +1415,24 @@ class TradeEngine {
                         preflightCommitment: "confirmed",
                         maxRetries: 5
                     });
-                    console.log(`[TRADE-ENGINE] ✅ Transaction successful! Signature: https://solscan.io/tx/${signature}`);
+                    console.log(`[TRADE-ENGINE] 📡 Transaction broadcast! Sig: ${signature}. Awaiting on-chain confirmation...`);
                 } catch (sendErr) {
                     console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error across all endpoints:", sendErr.message);
                     return null;
                 }
+
+                // CRITICAL FIX: NEVER ASSUME TRANSACTION SUCCEEDED!
+                // Verify on-chain execution with getSignatureStatus before recording ActiveTrade or dispatching Telegram alert.
+                const confirmation = await this.confirmTransactionSafe(signature);
+                if (!confirmation.confirmed) {
+                    console.error(`[TRADE-ENGINE] ❌ Transaction ${signature} failed on-chain or was dropped (${JSON.stringify(confirmation.err)}). Suppressing confirmed alert.`);
+                    if (action === "buy") {
+                        console.warn(`[TRADE-ENGINE] 🛑 BUY transaction did not execute on-chain. ActiveTrade NOT created.`);
+                    }
+                    return null;
+                }
+
+                console.log(`[TRADE-ENGINE] ✅ Transaction VERIFIED & CONFIRMED on-chain! Signature: https://solscan.io/tx/${signature}`);
                 
                 const telegramService = require('./telegram.service');
 
