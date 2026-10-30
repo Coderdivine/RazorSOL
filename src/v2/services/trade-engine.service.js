@@ -699,11 +699,16 @@ class TradeEngine {
         const telegramService = require('./telegram.service');
 
         const cleanAlertMsg =
-`📉 *Whale Sell Detected!* 📉\n\n` +
+`🕵️‍♂️ *WHALE INTEL* ➔ *WHALE DUMP / SELL* 📉\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`⚠️ _Tracker Alert: Monitored Whale Sold (NOT your bot's trade)_\n\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
 `${pnlSection}\n\n` +
-`📈 *Current MC:* ${mcTracker}\n\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
+`🤖 *My Bot Status:* ${razorActionDesc}\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
 `${links.footerButtons}`;
 
         // Whale sells are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
@@ -925,15 +930,24 @@ class TradeEngine {
 
         const telegramService = require('./telegram.service');
 
+        let myActionDesc = canExecuteBuy
+            ? `🟢 *Copy-Buy Triggered* (Entering \`${myTradeSize.toFixed(4)} SOL\`)`
+            : `⏸️ *Skipped* (${skipReason})`;
+
         const cleanAlertMsg =
-`🚨 *Whale Buy Detected!* 🚨\n\n` +
+`🕵️‍♂️ *WHALE INTEL* ➔ *WHALE BUY DETECTED* 🚨\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`⚠️ _Tracker Alert: Monitored Whale Bought (NOT your bot's trade)_\n\n` +
+`👤 *Whale:* [\`${shortWallet}\`](https://solscan.io/account/${watchedWallet.walletAddress})${whaleLabel}\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
-`💰 *Whale Spent:* ${spentDesc}\n` +
-`📈 *Current MC:* ${mcTracker}\n\n` +
+`💰 *Whale Spent:* \`${spentDesc}\`\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
+`🤖 *My Bot Action:* ${myActionDesc}\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
 `${links.footerButtons}`;
 
-        // Whale sells are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
+        // Whale buys are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
         telegramService.sendAlert(cleanAlertMsg, null, tradeEvent.mint);
 
         if (canExecuteBuy) {
@@ -1451,18 +1465,34 @@ class TradeEngine {
                         convictionDesc = `\n⚡ *Whale Conviction:* 🔥 *Elevated ($2,500+)* — 3x Priority`;
                     }
 
-                    const buyAlert =
-`⚡ *RAZOR BOT BUY CONFIRMED* ⚡\n\n` +
+                    const buyAlertAdmin =
+`🟢🚀 *[MY TRADE] RAZOR BOT BUY CONFIRMED* ⚡🟢\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
-`💰 *Buy Size:* \`${amount.toFixed(4)} SOL\`\n` +
+`💰 *My Investment:* \`${amount.toFixed(4)} SOL\`\n` +
 `🎯 *Mode:* ${modeDesc}${convictionDesc}\n` +
 `⛽ *Priority Fee:* \`${priorityFee} SOL\` (Profit Guard Protected)\n` +
-`🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
+`🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
 `${links.footerButtons}`;
 
-                    // RAZOR BOT BUY CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
-                    telegramService.sendAlert(buyAlert, buyAlert, mint);
+                    // Public group gets clean alert with private whale address masked
+                    const buyAlertGroup =
+`🟢🚀 *[MY TRADE] RAZOR BOT BUY CONFIRMED* ⚡🟢\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
+`🏷️ *CA:* \`${mint}\`\n` +
+`💰 *Trade Size:* \`${amount.toFixed(4)} SOL\`\n` +
+`🎯 *Strategy:* 🎯 Top Trader Mirror Snipe\n` +
+`🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`${links.footerButtons}`;
+
+                    // Send to BOTH admin DM (full details) and public group/channel (masked)
+                    telegramService.sendAlert(buyAlertAdmin, buyAlertGroup, mint);
 
                     if(isReentry && tradeId) {
                         const trade = await ActiveTrade.findById(tradeId);
@@ -1526,11 +1556,15 @@ class TradeEngine {
                     }
 
                     const sellAlert =
-`💸 *RAZOR BOT SELL CONFIRMED* 💸\n\n` +
+`🟢💰 *[MY TRADE] RAZOR BOT SELL CONFIRMED* 💸🟢\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
-`🎯 *Trigger:* ${triggerDesc}\n` +
-`🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${signature})\n\n` +
+`🎯 *Exit Trigger:* ${triggerDesc}\n` +
+`💰 *My Allocation:* \`${amount}\` Position Closed\n` +
+`🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
 `${links.footerButtons}`;
 
                     // RAZOR BOT SELL CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
