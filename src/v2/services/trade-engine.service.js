@@ -708,11 +708,20 @@ class TradeEngine {
 `${pnlSection}\n\n` +
 `📈 *Current MC:* ${mcTracker}\n` +
 `🤖 *My Bot Status:* ${razorActionDesc}\n` +
-`━━━━━━━━━━━━━━━━━━━━\n` +
-`${links.footerButtons}`;
+`━━━━━━━━━━━━━━━━━━━━`;
 
-        // Whale sells are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
-        telegramService.sendAlert(cleanAlertMsg, null, tradeEvent.mint);
+        // Public VIP Group receives clean Alpha signal: No private whale address and no bot balance info leaked!
+        const groupAlertMsg =
+`📉 *WHALE DUMP / TAKE PROFIT ALERT* 📉\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`🎯 _Top Tracked Whale Exiting Position (Whale Sell)_\n\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n\n` +
+`${pnlSection}\n\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
+`━━━━━━━━━━━━━━━━━━━━`;
+
+        telegramService.sendAlert(cleanAlertMsg, groupAlertMsg, tradeEvent.mint);
     }
 
     async updateTokenMilestones(mint, currentMC) {
@@ -944,11 +953,20 @@ class TradeEngine {
 `💰 *Whale Spent:* \`${spentDesc}\`\n` +
 `📈 *Current MC:* ${mcTracker}\n` +
 `🤖 *My Bot Action:* ${myActionDesc}\n` +
-`━━━━━━━━━━━━━━━━━━━━\n` +
-`${links.footerButtons}`;
+`━━━━━━━━━━━━━━━━━━━━`;
 
-        // Whale buys are private intelligence for the admin/bot DM only — NEVER sent to the public group/channel!
-        telegramService.sendAlert(cleanAlertMsg, null, tradeEvent.mint);
+        // Public VIP Group receives clean Alpha signal: No private whale address and no bot balance info leaked!
+        const groupAlertMsg =
+`🚨 *WHALE BUY DETECTED* 🚨\n` +
+`━━━━━━━━━━━━━━━━━━━━\n` +
+`🎯 _High-Conviction Whale Entry Snipe (Whale Buy)_\n\n` +
+`🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
+`🏷️ *CA:* \`${tradeEvent.mint}\`\n` +
+`💰 *Whale Buy Size:* \`${spentDesc}\`\n` +
+`📈 *Current MC:* ${mcTracker}\n` +
+`━━━━━━━━━━━━━━━━━━━━`;
+
+        telegramService.sendAlert(cleanAlertMsg, groupAlertMsg, tradeEvent.mint);
 
         if (canExecuteBuy) {
             // WHALE CONVICTION MULTIPLIER & PROFIT GUARD
@@ -1519,8 +1537,7 @@ class TradeEngine {
 `🎯 *Mode:* ${modeDesc}${convictionDesc}\n` +
 `⛽ *Priority Fee:* \`${priorityFee} SOL\` (Profit Guard Protected)\n` +
 `🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
-`━━━━━━━━━━━━━━━━━━━━\n` +
-`${links.footerButtons}`;
+`━━━━━━━━━━━━━━━━━━━━`;
 
                     // Public group gets clean alert with private whale address masked
                     const buyAlertGroup =
@@ -1532,8 +1549,7 @@ class TradeEngine {
 `💰 *Trade Size:* \`${amount.toFixed(4)} SOL\`\n` +
 `🎯 *Strategy:* 🎯 Top Trader Mirror Snipe\n` +
 `🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
-`━━━━━━━━━━━━━━━━━━━━\n` +
-`${links.footerButtons}`;
+`━━━━━━━━━━━━━━━━━━━━`;
 
                     // Send to BOTH admin DM (full details) and public group/channel (masked)
                     telegramService.sendAlert(buyAlertAdmin, buyAlertGroup, mint);
@@ -1608,8 +1624,7 @@ class TradeEngine {
 `🎯 *Exit Trigger:* ${triggerDesc}\n` +
 `💰 *My Allocation:* \`${amount}\` Position Closed\n` +
 `🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
-`━━━━━━━━━━━━━━━━━━━━\n` +
-`${links.footerButtons}`;
+`━━━━━━━━━━━━━━━━━━━━`;
 
                     // RAZOR BOT SELL CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
                     // Alert deduplication: Suppress duplicate alerts for the same token and exit trigger within 45 seconds

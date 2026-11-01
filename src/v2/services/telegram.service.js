@@ -2244,10 +2244,33 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 disable_web_page_preview: true
             };
 
+            // Build interactive URL buttons if CA is provided
+            let buttonMarkup = null;
+            let targetMint = mint;
+            if (!targetMint && text) {
+                const match = text.match(/(?:🏷️ \*CA:\*|🏷️ CA:|CA:)\s*`?([1-9A-HJ-NP-Za-km-z]{32,44})`?/);
+                if (match) targetMint = match[1];
+            }
+            if (targetMint) {
+                buttonMarkup = Markup.inlineKeyboard([
+                    [
+                        Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
+                        Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`)
+                    ],
+                    [
+                        Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`),
+                        Markup.button.url('⚡ GMGN', `https://gmgn.ai/sol/token/${targetMint}`)
+                    ]
+                ]).reply_markup;
+                sendOpts.reply_markup = buttonMarkup;
+            }
+
             await this.bot.telegram.sendMessage(adminChatId, text, sendOpts).catch(async (err) => {
                 console.warn("[TELEGRAM] ⚠️ Markdown parse failed for admin direct message, sending fallback plain text:", err.message);
                 const plainText = text.replace(/[*_`]/g, '');
-                await this.bot.telegram.sendMessage(adminChatId, plainText, { disable_web_page_preview: true });
+                const fallbackOpts = { disable_web_page_preview: true };
+                if (buttonMarkup) fallbackOpts.reply_markup = buttonMarkup;
+                await this.bot.telegram.sendMessage(adminChatId, plainText, fallbackOpts);
             });
 
             console.log(`[TELEGRAM] ✉️ Direct admin notification sent strictly to admin private chat: ${adminChatId}`);
@@ -2263,6 +2286,28 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         // Group message is ONLY sent when explicitly provided (e.g., BUY/SELL CONFIRMED).
         // Whale tracking and private internal alerts pass groupMessage = null and MUST NEVER be sent to the public channel.
         const groupMsg = groupMessage || null;
+
+        // Auto-extract mint from CA line if not explicitly passed
+        let targetMint = mint;
+        if (!targetMint) {
+            const combined = `${adminMsg || ''} ${groupMsg || ''}`;
+            const match = combined.match(/(?:🏷️ \*CA:\*|🏷️ CA:|CA:)\s*`?([1-9A-HJ-NP-Za-km-z]{32,44})`?/);
+            if (match) targetMint = match[1];
+        }
+
+        let buttonMarkup = null;
+        if (targetMint) {
+            buttonMarkup = Markup.inlineKeyboard([
+                [
+                    Markup.button.url('📊 DexScreener', `https://dexscreener.com/solana/${targetMint}`),
+                    Markup.button.url('💊 Pump.fun', `https://pump.fun/${targetMint}`)
+                ],
+                [
+                    Markup.button.url('🔎 Solscan', `https://solscan.io/token/${targetMint}`),
+                    Markup.button.url('⚡ GMGN', `https://gmgn.ai/sol/token/${targetMint}`)
+                ]
+            ]).reply_markup;
+        }
 
         // 1. Identify VIP channel (Group destination for prospects/subscribers)
         let vipChannelId = null;
@@ -2356,12 +2401,15 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
 
         console.log(`[TELEGRAM] 📤 Dispatching alert ➔ Admin Targets (${adminTargets.size}): [${[...adminTargets].join(', ')}], Group Targets (${groupTargets.size}): [${[...groupTargets].join(', ')}]`);
 
-        // Send full details to Admin (Private DM only) - Clean text with markdown links, no messy buttons
+        // Send full details to Admin (Private DM only) with interactive link buttons
         for (const targetId of adminTargets) {
             const sendOpts = {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             };
+            if (buttonMarkup) {
+                sendOpts.reply_markup = buttonMarkup;
+            }
 
             try {
                 await this.bot.telegram.sendMessage(targetId, adminMsg, sendOpts);
@@ -2369,7 +2417,9 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                 if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                     try {
                         const plainText = adminMsg.replace(/[*_`\[\]()]/g, '');
-                        await this.bot.telegram.sendMessage(targetId, plainText);
+                        const fallbackOpts = { disable_web_page_preview: true };
+                        if (buttonMarkup) fallbackOpts.reply_markup = buttonMarkup;
+                        await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                     } catch {}
                 } else {
                     console.warn(`[TELEGRAM] ⚠️ Admin alert dispatch notice for ${targetId}:`, err.message);
@@ -2377,13 +2427,16 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
             }
         }
 
-        // Send to Group/Channel ONLY if groupMsg is explicitly provided (BUY & SELL confirmed trades only!)
+        // Send to Group/Channel ONLY if groupMsg is explicitly provided (BUY & SELL alerts with link buttons)
         if (groupMsg && groupTargets.size > 0) {
             for (const targetId of groupTargets) {
                 const sendOpts = {
                     parse_mode: 'Markdown',
                     disable_web_page_preview: true
                 };
+                if (buttonMarkup) {
+                    sendOpts.reply_markup = buttonMarkup;
+                }
 
                 try {
                     await this.bot.telegram.sendMessage(targetId, groupMsg, sendOpts);
@@ -2391,7 +2444,9 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
                     if (err.message.includes("can't parse entities") || err.message.includes('find end of the entity')) {
                         try {
                             const plainText = groupMsg.replace(/[*_`\[\]()]/g, '');
-                            await this.bot.telegram.sendMessage(targetId, plainText);
+                            const fallbackOpts = { disable_web_page_preview: true };
+                            if (buttonMarkup) fallbackOpts.reply_markup = buttonMarkup;
+                            await this.bot.telegram.sendMessage(targetId, plainText, fallbackOpts);
                         } catch {}
                     } else {
                         console.warn(`[TELEGRAM] ⚠️ Group alert dispatch notice for ${targetId}:`, err.message);
