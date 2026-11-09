@@ -37,21 +37,7 @@ class SolanaService {
 
         console.log(`[SOLANA-RPC] ⚡ Primary Public RPC active: ${this.rpcUrl}`);
         if (this.infuraRpcUrl) {
-            console.log(`[SOLANA-RPC] 🛡️ Infura VIP RPC configured for critical trades & failover: ${this.infuraRpcUrl.substring(0, 38)}...`);
-            // Non-blocking verification to ensure Solana network is toggled on in Infura settings
-            if (typeof globalThis.fetch === 'function') {
-                globalThis.fetch(this.infuraRpcUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getVersion' })
-                }).then(async res => {
-                    if (res.status === 200) {
-                        console.log(`[SOLANA-RPC] ✅ Infura Solana VIP network confirmed active & ready.`);
-                    } else if (res.status === 401) {
-                        console.log(`[SOLANA-RPC] ⚠️ Infura Notice: Solana network is not yet toggled ON for this key. Please open Infura Dashboard -> Configure -> Enable Solana.`);
-                    }
-                }).catch(() => {});
-            }
+            console.log(`[SOLANA-RPC] 🛡️ Infura VIP RPC configured strictly for Buy/Sell trade execution: ${this.infuraRpcUrl.substring(0, 38)}...`);
         }
         console.log(`[SOLANA-RPC] 🔌 Solana WebSocket endpoint active: ${this.wsEndpoint}`);
 
@@ -74,13 +60,14 @@ class SolanaService {
                     const balance = await secConn.getBalance(pubKey);
                     return balance / LAMPORTS_PER_SOL;
                 } catch (secErr) {
-                    // 3. Dynamic Failover: Infura Paid RPC
-                    if (this.infuraConnection) {
-                        console.log(`[SOLANA-RPC] 🛡️ Public RPC balance check failed for ${walletAddress}. Dynamic failover engaged: using Infura paid RPC.`);
-                        const balance = await this.infuraConnection.getBalance(pubKey);
+                    // 3. Fallback to Ankr Public RPC (NEVER call Infura for routine balance checks)
+                    try {
+                        const ankrConn = new Connection('https://rpc.ankr.com/solana', 'confirmed');
+                        const balance = await ankrConn.getBalance(pubKey);
                         return balance / LAMPORTS_PER_SOL;
+                    } catch {
+                        throw secErr;
                     }
-                    throw secErr;
                 }
             }
         } catch (err) {
@@ -257,9 +244,10 @@ class SolanaService {
         return null;
     }
 
-    // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry & RPC fallback
+    // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry across public RPC endpoints
+    // (Infura is NEVER called here to prevent API credit leakage; Infura is strictly reserved for buy/sell execution)
     async fetchParsedTransactionSafe(signature, maxRetries = 3) {
-        const publicEndpoints = [this.rpcUrl, 'https://solana-rpc.publicnode.com'].filter(Boolean);
+        const publicEndpoints = [this.rpcUrl, 'https://solana-rpc.publicnode.com', 'https://rpc.ankr.com/solana'].filter(Boolean);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             // 1. Try web3 connection on primary public RPC
             try {
@@ -302,38 +290,6 @@ class SolanaService {
                     }
                 } catch (rpcErr) {
                     // Try next public endpoint
-                }
-            }
-
-            // 3. Dynamic Emergency Fallback: If public RPCs failed, were rate-limited (429), or returned nothing
-            if (this.infuraRpcUrl) {
-                try {
-                    const res = await fetch(this.infuraRpcUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            jsonrpc: '2.0',
-                            id: 1,
-                            method: 'getTransaction',
-                            params: [
-                                signature,
-                                {
-                                    encoding: 'jsonParsed',
-                                    commitment: 'confirmed',
-                                    maxSupportedTransactionVersion: 1
-                                }
-                            ]
-                        })
-                    });
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data && data.result && data.result.meta) {
-                            console.log(`[SOLANA-RPC] 🛡️ Public RPC rate-limited/failed. Dynamic failover engaged: parsed tx ${signature.substring(0, 8)}... via Infura paid RPC.`);
-                            return data.result;
-                        }
-                    }
-                } catch (infuraErr) {
-                    console.warn(`[SOLANA-RPC] ⚠️ Infura RPC fallback attempt ${attempt} error:`, infuraErr.message);
                 }
             }
 
