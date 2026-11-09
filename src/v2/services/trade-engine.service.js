@@ -329,7 +329,7 @@ class TradeEngine {
         }
         try {
             const pubkey = new PublicKey(mint);
-            const conn = this.connection;
+            const conn = solanaService.infuraConnection || this.connection;
             const acc = await conn.getParsedAccountInfo(pubkey);
             const info = acc?.value?.data?.parsed?.info;
             if (!info) {
