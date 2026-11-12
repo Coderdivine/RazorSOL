@@ -6,7 +6,13 @@ const TokenMetrics = require('../models/TokenMetrics');
 const ChannelMember = require('../models/ChannelMember');
 const BotSettings = require('../models/BotSettings');
 const solanaService = require('./solana.service');
-const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY, TELEGRAM_ALERTS_CHANNEL } = process.env;
+const { TELEGRAM_BOT_TOKEN, WALLET_PUBLIC_KEY, TELEGRAM_ALERTS_CHANNEL, TELEGRAM_ADMIN_IDS } = process.env;
+
+// Telegram user IDs allowed to control the bot (comma separated). See isAdminUser().
+const ENV_ADMIN_IDS = String(TELEGRAM_ADMIN_IDS || '')
+    .split(',')
+    .map(v => v.trim())
+    .filter(v => /^\d+$/.test(v));
 
 function isValidSolanaAddress(addr) {
     if (!addr || typeof addr !== 'string') return false;
@@ -28,6 +34,70 @@ class TelegramService {
         this.adminChatId = null;
     }
 
+    /** Work out who owns the bot: TELEGRAM_ADMIN_IDS if set, otherwise the admin chat already on record. */
+    async loadOwner() {
+        this.ownerIds = new Set(ENV_ADMIN_IDS);
+        if (this.ownerIds.size > 0) {
+            this.adminChatId = ENV_ADMIN_IDS[0];
+            console.log(`[TELEGRAM] 🔒 Owner lock: ${this.ownerIds.size} admin ID(s) from TELEGRAM_ADMIN_IDS.`);
+            return;
+        }
+        try {
+            const settings = await BotSettings.findOne({ key: 'global' });
+            if (settings && settings.adminChatId) {
+                this.ownerIds.add(String(settings.adminChatId));
+                this.adminChatId = String(settings.adminChatId);
+                console.warn(`[TELEGRAM] 🔒 Owner lock: using the admin chat on record (${this.adminChatId}). Set TELEGRAM_ADMIN_IDS to pin the owner explicitly.`);
+                return;
+            }
+        } catch {}
+        console.warn('[TELEGRAM] ⚠️ No owner on record. The FIRST private chat to message the bot will become the owner. Set TELEGRAM_ADMIN_IDS to avoid this.');
+    }
+
+    async isAdminUser(userId, chatType) {
+        if (!this.ownerIds) this.ownerIds = new Set(ENV_ADMIN_IDS);
+        if (this.ownerIds.has(userId)) return true;
+        // First run with nothing configured: the first private chat claims ownership, once.
+        if (this.ownerIds.size === 0 && chatType === 'private') {
+            // Re-check the database first. If it cannot be read, refuse rather than hand out ownership.
+            try {
+                const settings = await BotSettings.findOne({ key: 'global' });
+                if (settings && settings.adminChatId) {
+                    this.ownerIds.add(String(settings.adminChatId));
+                    this.adminChatId = String(settings.adminChatId);
+                    return this.ownerIds.has(userId);
+                }
+            } catch {
+                return false;
+            }
+            this.ownerIds.add(userId);
+            this.adminChatId = userId;
+            await BotSettings.findOneAndUpdate({ key: 'global' }, { adminChatId: userId }, { upsert: true }).catch(() => {});
+            console.warn(`[TELEGRAM] 🔒 Owner claimed by Telegram user ${userId}. Add TELEGRAM_ADMIN_IDS=${userId} to the environment to make this permanent.`);
+            return true;
+        }
+        return false;
+    }
+
+    /** Middleware: only the owner may drive the bot. Everyone else can read the pricing page, nothing more. */
+    async ownerGate(ctx, next) {
+        // Membership updates carry no command and must always reach the channel manager.
+        if (ctx.updateType === 'chat_member' || ctx.updateType === 'my_chat_member') return next();
+
+        const userId = ctx.from?.id ? String(ctx.from.id) : null;
+        if (userId && await this.isAdminUser(userId, ctx.chat?.type)) {
+            if (ctx.chat?.type === 'private' && !this.adminChatId) this.adminChatId = String(ctx.chat.id);
+            return next();
+        }
+
+        const text = ctx.message?.text || '';
+        if (ctx.chat?.type === 'private' && /^\/(start|pricing)(@\w+)?(\s|$)/.test(text)) {
+            return this.handlePricing(ctx);
+        }
+        if (ctx.callbackQuery) await ctx.answerCbQuery('Not authorized.').catch(() => {});
+        if (userId) console.warn(`[TELEGRAM] 🚫 Blocked ${ctx.updateType} from non-owner user ${userId}.`);
+    }
+
     async init() {
         if (!TELEGRAM_BOT_TOKEN) {
             console.log("[TELEGRAM] ⚠️ No Telegram Bot Token found. Telegram controller disabled.");
@@ -42,21 +112,11 @@ class TelegramService {
             console.warn(`[TELEGRAM] ⚠️ Handled Telegraf network/API error for ${ctx?.updateType || 'operation'}:`, err.message);
         });
 
-        // Auto-capture admin chat ID from any direct interaction in private chat
-        this.bot.use(async (ctx, next) => {
-            if (ctx.chat?.type === 'private' && ctx.chat?.id) {
-                const chatId = String(ctx.chat.id);
-                if (this.adminChatId !== chatId) {
-                    this.adminChatId = chatId;
-                    BotSettings.findOneAndUpdate(
-                        { key: 'global' },
-                        { adminChatId: chatId },
-                        { upsert: true }
-                    ).catch(() => {});
-                }
-            }
-            return next();
-        });
+        // OWNER LOCK. This bot can buy, sell and add wallets to copy, so only the owner may drive it.
+        // Before this check existed, anyone who found the bot could run every command and would also
+        // silently replace the owner as the recipient of admin alerts.
+        await this.loadOwner();
+        this.bot.use((ctx, next) => this.ownerGate(ctx, next));
 
         this.registerCommands();
         this.registerChannelManager();
@@ -78,7 +138,8 @@ class TelegramService {
                 { command: 'setchannel', description: '⚙️ Bind VIP Channel: /setchannel <channel_id>' },
                 { command: 'pricing', description: '💎 View VIP Plans & Pricing' },
                 { command: 'positions', description: '💼 View Open Positions & Trade History' },
-                { command: 'stats', description: '📊 Real-time PnL & Performance Terminal' },
+                { command: 'stats', description: '📊 Real PnL from recorded fills' },
+                { command: 'scorecard', description: '🧾 Results per copied wallet (30 days)' },
                 { command: 'profile', description: '🤖 Bot Profile, Strategy & Live Status' },
                 { command: 'earlyca', description: '⚙️ Toggle Early CA Discovery: /earlyca [on|off]' },
                 { command: 'threshold', description: '🎯 Set Watchlist Threshold: /threshold <amount>' },
@@ -248,6 +309,9 @@ class TelegramService {
              this.sendHelpMessage(ctx);
         });
 
+        // Per wallet scorecard
+        this.bot.command('scorecard', (ctx) => this.handleScorecard(ctx));
+
         // Stats Command
         this.bot.command('stats', (ctx) => {
              console.log(`[TELEGRAM] 📥 Received /stats command from user: ${ctx.chat.id}`);
@@ -269,7 +333,7 @@ class TelegramService {
 
             for (const trade of openTrades) {
                 const label = trade.tokenName || trade.mint.substring(0, 8);
-                const statusMsg = await ctx.reply(`🚨 *Emergency Manual Exit:* Selling 100% of *${label}* (Fast Priority: \`${panicFee} SOL\`) via Infura Paid RPC...`, { parse_mode: 'Markdown' });
+                const statusMsg = await ctx.reply(`🚨 *Emergency Manual Exit:* Selling 100% of *${label}* (Fast Priority: \`${panicFee} SOL\`)...`, { parse_mode: 'Markdown' });
                 const sig = await tradeEngine.executeTradeLocal(trade.mint, "sell", "100%", false, panicFee, "MANUAL_PANIC", null, trade._id);
                 if (sig) {
                     trade.status = "CLOSED";
@@ -280,7 +344,7 @@ class TelegramService {
                         ctx.chat.id,
                         statusMsg.message_id,
                         null,
-                        `✅ *Sold 100% of ${label}!*\n\n🔗 TX: [View on Solscan](https://solscan.io/tx/${sig})`,
+                        `✅ *Sold 100% of ${label}!*\n\n🔗 TX: ${tradeEngine.txRef(sig)}`,
                         { parse_mode: 'Markdown', disable_web_page_preview: true }
                     ).catch(() => {});
                 } else {
@@ -711,7 +775,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await tradeEngine.updateMyBalance();
             const emergencyFee = Number(Math.min(0.0008, Math.max(0.0001, tradeEngine.myBalance - 0.0004)).toFixed(5));
 
-            const statusMsg = await ctx.reply(`⏳ *Executing Fast 100% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${emergencyFee} SOL\`) via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            const statusMsg = await ctx.reply(`⏳ *Executing Fast 100% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${emergencyFee} SOL\`)...*`, { parse_mode: 'Markdown' });
 
             const activeTrade = await ActiveTrade.findOne({
                 mint,
@@ -733,7 +797,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
                     null,
                     `✅ *Manual 100% Sell Confirmed!*\n\n` +
                     `🪙 *Token:* \`${mint}\`\n` +
-                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    `🔗 *TX:* ${tradeEngine.txRef(sig)}`,
                     { parse_mode: 'Markdown', disable_web_page_preview: true }
                 ).catch(() => {});
             } else {
@@ -756,7 +820,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await tradeEngine.updateMyBalance();
             const partialFee = Number(Math.min(0.0005, Math.max(0.0001, tradeEngine.myBalance - 0.0004)).toFixed(5));
 
-            const statusMsg = await ctx.reply(`⏳ *Executing 50% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${partialFee} SOL\`) via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            const statusMsg = await ctx.reply(`⏳ *Executing 50% Sell for \`${mint.substring(0, 8)}...\` (Priority: \`${partialFee} SOL\`)...*`, { parse_mode: 'Markdown' });
 
             const sig = await tradeEngine.executeTradeLocal(mint, "sell", "50%", false, partialFee, "MANUAL_TELEGRAM");
             if (sig) {
@@ -766,7 +830,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
                     null,
                     `✅ *Manual 50% Sell Confirmed!*\n\n` +
                     `🪙 *Token:* \`${mint}\`\n` +
-                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    `🔗 *TX:* ${tradeEngine.txRef(sig)}`,
                     { parse_mode: 'Markdown', disable_web_page_preview: true }
                 ).catch(() => {});
             } else {
@@ -786,14 +850,15 @@ _Tap any button below or use the pinned menu at the bottom:_`;
             await ctx.answerCbQuery('⚡ Calculating balance & buying...').catch(() => {});
             const tradeEngine = require('./trade-engine.service');
 
-            await tradeEngine.updateMyBalance();
-            const tradeAmount = Math.max(0, tradeEngine.myBalance - 0.003);
+            // Same sizing rules as automatic buys: never the whole wallet, never a dust trade.
+            const sizing = await tradeEngine.sizeNextTrade();
+            const tradeAmount = sizing.sizeSol;
 
-            if (tradeAmount < 0.005) {
-                return ctx.reply(`⚠️ Insufficient balance to buy more (${tradeEngine.myBalance.toFixed(4)} SOL). Need ≥ 0.005 SOL.`);
+            if (tradeAmount <= 0) {
+                return ctx.reply(`⚠️ Cannot buy more. ${sizing.reason}`);
             }
 
-            const statusMsg = await ctx.reply(`⏳ *Buying \`${tradeAmount.toFixed(4)} SOL\` of \`${mint.substring(0, 8)}...\` via Infura Paid RPC...*`, { parse_mode: 'Markdown' });
+            const statusMsg = await ctx.reply(`⏳ *Buying \`${tradeAmount.toFixed(4)} SOL\` of \`${mint.substring(0, 8)}...\`...*`, { parse_mode: 'Markdown' });
             const sig = await tradeEngine.executeTradeLocal(mint, "buy", tradeAmount, true, 0.0001, "MANUAL_BUY_MORE");
             if (sig) {
                 await ctx.telegram.editMessageText(
@@ -803,7 +868,7 @@ _Tap any button below or use the pinned menu at the bottom:_`;
                     `✅ *Manual Buy Confirmed!*\n\n` +
                     `🪙 *Token:* \`${mint}\`\n` +
                     `💰 *Amount:* \`${tradeAmount.toFixed(4)} SOL\`\n` +
-                    `🔗 *TX Hash:* [View on Solscan](https://solscan.io/tx/${sig})`,
+                    `🔗 *TX:* ${tradeEngine.txRef(sig)}`,
                     { parse_mode: 'Markdown', disable_web_page_preview: true }
                 ).catch(() => {});
             } else {
@@ -1245,7 +1310,7 @@ Control automatic early token discovery (milestone sniper) and customize market 
     async handleBotAddress(ctx) {
         try {
             const walletAddress = WALLET_PUBLIC_KEY || 'Not Configured';
-            const solBalance = WALLET_PUBLIC_KEY ? await solanaService.getSolBalance(WALLET_PUBLIC_KEY) : 0;
+            const solBalance = (WALLET_PUBLIC_KEY ? await solanaService.getSolBalance(WALLET_PUBLIC_KEY) : 0) ?? 0;
             const solPrice = solanaService.getSolPriceUSD();
             const usdBalance = (solBalance * solPrice).toFixed(2);
             const streamStatus = solBalance >= 0.02
@@ -1396,7 +1461,7 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
                 : walletAddress;
 
             const [solBalance, watchedCount, trackedTokensCount, openTradesCount, closedTradesCount] = await Promise.all([
-                WALLET_PUBLIC_KEY ? solanaService.getSolBalance(WALLET_PUBLIC_KEY) : 0,
+                WALLET_PUBLIC_KEY ? solanaService.getSolBalance(WALLET_PUBLIC_KEY).then(b => b ?? 0) : 0,
                 WatchedWallet.countDocuments({ isActive: true }).catch(() => 0),
                 TokenMetrics.countDocuments({}).catch(() => 0),
                 ActiveTrade.countDocuments({ status: { $in: ['OPEN', 'REENTERED', 'TP_TAKEN_WAITING_REENTRY'] } }).catch(() => 0),
@@ -1468,6 +1533,51 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
         }
     }
 
+    /** Real results per copied wallet over 30 days, so each wallet has to earn its place. */
+    async handleScorecard(ctx) {
+        try {
+            const statsService = require('./stats.service');
+            const WhalePosition = require('../models/WhalePosition');
+            const stats = await statsService.getStats('1m');
+            const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+            const wallets = await WatchedWallet.find({}).lean();
+            const labelOf = addr => {
+                const w = wallets.find(x => x.walletAddress === addr);
+                const short = addr && addr.length > 10 ? `${addr.substring(0, 4)}...${addr.substring(addr.length - 4)}` : (addr || 'manual');
+                return w && w.label && w.label !== 'Whale Wallet' ? `${w.label} (${short})` : short;
+            };
+
+            const rows = [];
+            const seen = new Set();
+            for (const r of stats.byWallet) {
+                seen.add(r.wallet);
+                const signals = r.wallet === 'manual' ? 0 : await WhalePosition.countDocuments({ walletAddress: r.wallet, createdAt: { $gte: since } }).catch(() => 0);
+                rows.push({ ...r, signals });
+            }
+            for (const w of wallets.filter(x => x.isActive && !seen.has(x.walletAddress))) {
+                const signals = await WhalePosition.countDocuments({ walletAddress: w.walletAddress, createdAt: { $gte: since } }).catch(() => 0);
+                rows.push({ wallet: w.walletAddress, signals, measuredCount: 0, wins: 0, losses: 0, totalPnlSol: 0, roiPct: 0, openCount: 0 });
+            }
+
+            const lines = rows.length === 0 ? ['_No watched wallets and no trades yet._'] : rows.map(r =>
+`*${labelOf(r.wallet)}*
+• Buy signals seen: \`${r.signals}\` • Trades taken: \`${r.measuredCount}\` (${r.wins}W / ${r.losses}L) • Open: \`${r.openCount}\`
+• Net: \`${r.totalPnlSol >= 0 ? '+' : ''}${r.totalPnlSol.toFixed(4)} SOL\` • Return: \`${r.roiPct >= 0 ? '+' : ''}${r.roiPct.toFixed(1)}%\``);
+
+            const text =
+`🧾 *WALLET SCORECARD • 30 DAYS*
+${stats.mode === 'paper' ? '📝 Paper mode (simulated fills)' : '🔴 Live (real fills)'}
+━━━━━━━━━━━━━━━━━━━━
+${lines.join('\n\n')}
+━━━━━━━━━━━━━━━━━━━━
+_A wallet earns live capital only after its paper results stay positive over a meaningful number of trades._`;
+            await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        } catch (err) {
+            console.error('[TELEGRAM] ❌ Error in handleScorecard:', err.message);
+            ctx.reply('❌ Error building the scorecard.').catch(() => {});
+        }
+    }
+
     async handleStats(ctx, timeframe = '1d') {
         const statsService = require('./stats.service');
         const stats = await statsService.getStats(timeframe);
@@ -1475,20 +1585,29 @@ When disabled, Razor ignores untargeted token launches, conserving bandwidth and
         const pnlUsd = (stats.totalPnlSol * solPrice).toFixed(2);
         const pnlPrefix = stats.totalPnlSol >= 0 ? '+' : '';
 
-        const caption = 
-`⚡ *RAZOR PROTOCOL • PERFORMANCE TERMINAL*
+        const modeLine = stats.mode === 'paper'
+            ? '📝 *PAPER MODE* (simulated fills, no funds moved)'
+            : '🔴 *LIVE* (real fills read from the chain)';
+        const unmeasuredLine = stats.unmeasuredCount > 0
+            ? `\n• Not Measured: \`${stats.unmeasuredCount}\` closed trade(s) with no recorded fill, excluded`
+            : '';
+        const caption =
+`⚡ *RAZOR • PERFORMANCE*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⏱️ *Window:* ${stats.timeframeLabel} • Solana Mainnet
+⏱️ *Window:* ${stats.timeframeLabel}
+${modeLine}
 
-📊 *PnL Metrics:*
+📊 *Realized Results (measured trades only):*
 • Net PnL: \`${pnlPrefix}${stats.totalPnlSol.toFixed(4)} SOL\` (~$${pnlUsd})
-• Win Rate: \`${stats.winRate}%\` (${stats.closedCount} Settled)
-• Open Positions: \`${stats.openCount} Active\`
+• Return on Capital Used: \`${stats.roiPct >= 0 ? '+' : ''}${stats.roiPct.toFixed(1)}%\`
+• Win Rate: \`${stats.winRate}%\` (${stats.wins}W / ${stats.losses}L)
+• Fees Paid: \`${stats.totalFeesSol.toFixed(5)} SOL\`
+• Open Positions: \`${stats.openCount}\`${unmeasuredLine}
 
 🎯 *Network Status:*
 • Monitored Whales: \`${stats.totalWatched} Wallets\`
 • Total Logged Trades: \`${stats.totalTrades}\`
-• SOL Price: \`$${solPrice.toFixed(2)}\`
+• SOL Price: \`${solPrice ? '$' + solPrice.toFixed(2) : 'unavailable'}\`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
         const keyboard = this.getStatsButtons(timeframe);
@@ -2207,7 +2326,7 @@ We hope you enjoyed watching live top-trader calls! Over your trial, Razor close
         }
     }
 
-    async sendAdminDirectMessage(text) {
+    async sendAdminDirectMessage(text, mint = null) {
         if (!this.bot) return;
         try {
             let adminChatId = this.adminChatId || null;

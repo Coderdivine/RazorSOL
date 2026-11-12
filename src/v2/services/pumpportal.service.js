@@ -146,6 +146,17 @@ class PumpPortalService {
         // Handle PumpPortal API Error Responses silently without spamming Telegram
         if (msg.errors) {
             console.log(`[PUMPPORTAL] ℹ️ API Notice: ${msg.errors} (Dual-Engine Solana RPC on-chain listener is active)`);
+            // Tell the admin once per boot. A rejected trade stream means open positions are only
+            // priced by the slower 10 second poll, which matters for stop losses.
+            if (!this.streamErrorNotified) {
+                this.streamErrorNotified = true;
+                try {
+                    const telegramService = require('./telegram.service');
+                    const clean = String(msg.errors).replace(/[_*`\[\]]/g, ' ').slice(0, 200);
+                    await telegramService.sendAdminDirectMessage(
+`⚠️ *PumpPortal data stream notice*\n${clean}\n\nTrade streams are metered and need a funded API key wallet. Until this is resolved, exits rely on the 10 second price poll.`);
+                } catch {}
+            }
             return;
         }
 

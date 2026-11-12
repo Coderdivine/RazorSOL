@@ -21,5 +21,11 @@ services:
         sync: false
       - key: TELEGRAM_ALERTS_CHANNEL
         sync: false
+      # Keyed RPC endpoint (free Helius / QuickNode / Alchemy key). Do not use the shared public endpoint.
       - key: SOLANA_RPC_URL
-        value: https://api.mainnet-beta.solana.com/
+        sync: false
+      - key: TELEGRAM_ADMIN_IDS
+        sync: false
+      # paper = simulated fills. Switch to live only after paper results justify it.
+      - key: TRADING_MODE
+        value: paper

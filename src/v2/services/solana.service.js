@@ -1,7 +1,20 @@
 require('dotenv').config();
-const { Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+const { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, TransactionInstruction } = require('@solana/web3.js');
 const WatchedWallet = require('../models/WatchedWallet');
 const { SOLANA_RPC_URL, INFURA_API_KEY, INFURA_SOLANA_RPC_URL, SOLANA_WSS_URL } = process.env;
+
+const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+const PUBLIC_WSS = 'wss://api.mainnet-beta.solana.com';
+const FALLBACK_RPC = 'https://solana-rpc.publicnode.com';
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+const STABLE_MINTS = new Set([
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
+]);
+const TOKEN_PROGRAM_IDS = new Set([
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // SPL Token
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'  // Token-2022
+]);
 
 const BASE_MINTS = new Set([
     'So11111111111111111111111111111111111111112', // WSOL
@@ -11,160 +24,255 @@ const BASE_MINTS = new Set([
 
 class SolanaService {
     constructor() {
-        // 1. Infura RPC Configuration (Dedicated VIP for critical trades, blockhash & dynamic failover)
-        const infuraKey = INFURA_API_KEY || (INFURA_SOLANA_RPC_URL ? INFURA_SOLANA_RPC_URL.split('/').pop() : '');
-        this.infuraRpcUrl = INFURA_SOLANA_RPC_URL || (infuraKey ? `https://solana-mainnet.infura.io/v3/${infuraKey}` : null);
+        // ONE primary RPC handles every read, subscription and confirmation.
+        // Point SOLANA_RPC_URL at a keyed endpoint (a free Helius, QuickNode or Alchemy key is enough).
+        // The shared public endpoint rate limits hard, which is what used to push all traffic onto Infura.
+        this.rpcUrl = (SOLANA_RPC_URL || '').trim() || PUBLIC_RPC;
+        this.usingPublicRpc = this.rpcUrl.includes('api.mainnet-beta.solana.com');
 
-        // 2. Public RPC for routine, high-volume background tasks (balance polling, token supply, metadata, whale logs)
-        // This preserves the Infura free tier (100k requests/day) strictly for VIP trade execution and failovers.
-        const configuredRpc = SOLANA_RPC_URL && !SOLANA_RPC_URL.includes('infura.io') ? SOLANA_RPC_URL : null;
-        this.rpcUrl = configuredRpc || "https://api.mainnet-beta.solana.com";
-
-        // WebSocket endpoint
-        const defaultWss = "wss://api.mainnet-beta.solana.com";
-        this.wsEndpoint = SOLANA_WSS_URL || defaultWss;
+        // Infura does not serve Solana websockets, so never derive a ws endpoint from it.
+        const derivedWs = this.rpcUrl.includes('infura.io') ? PUBLIC_WSS : this.rpcUrl.replace(/^http/i, 'ws');
+        this.wsEndpoint = (SOLANA_WSS_URL || '').trim() || derivedWs;
 
         this.connection = new Connection(this.rpcUrl, {
             commitment: 'confirmed',
-            wsEndpoint: this.wsEndpoint
+            wsEndpoint: this.wsEndpoint,
+            disableRetryOnRateLimit: true // fail fast instead of sleeping through 429s mid trade
         });
 
-        // Infura VIP Connection (used exclusively for transaction racing and fallback)
-        this.infuraConnection = this.infuraRpcUrl ? new Connection(this.infuraRpcUrl, {
+        // Free read fallback, created once and used only when the primary errors.
+        this.fallbackConnection = new Connection(FALLBACK_RPC, {
             commitment: 'confirmed',
-            wsEndpoint: this.wsEndpoint
-        }) : null;
+            disableRetryOnRateLimit: true
+        });
 
-        console.log(`[SOLANA-RPC] ⚡ Primary Public RPC active: ${this.rpcUrl}`);
-        if (this.infuraRpcUrl) {
-            console.log(`[SOLANA-RPC] 🛡️ Infura VIP RPC configured for critical trades & failover: ${this.infuraRpcUrl.substring(0, 38)}...`);
-            // Non-blocking verification to ensure Solana network is toggled on in Infura settings
-            if (typeof globalThis.fetch === 'function') {
-                globalThis.fetch(this.infuraRpcUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getVersion' })
-                }).then(async res => {
-                    if (res.status === 200) {
-                        console.log(`[SOLANA-RPC] ✅ Infura Solana VIP network confirmed active & ready.`);
-                    } else if (res.status === 401) {
-                        console.log(`[SOLANA-RPC] ⚠️ Infura Notice: Solana network is not yet toggled ON for this key. Please open Infura Dashboard -> Configure -> Enable Solana.`);
-                    }
-                }).catch(() => {});
-            }
+        // Optional second BROADCASTER. It is never used for reads, polling or failover,
+        // so it cannot burn a daily credit allowance in the background.
+        const infuraKey = INFURA_API_KEY || '';
+        const infuraUrl = (INFURA_SOLANA_RPC_URL || '').trim() || (infuraKey ? `https://solana-mainnet.infura.io/v3/${infuraKey}` : '');
+        this.broadcastConnection = (infuraUrl && infuraUrl !== this.rpcUrl)
+            ? new Connection(infuraUrl, { commitment: 'confirmed', disableRetryOnRateLimit: true })
+            : null;
+        // Kept for older call sites. Do not use for reads.
+        this.infuraConnection = null;
+        this.infuraRpcUrl = null;
+
+        console.log(`[SOLANA-RPC] ⚡ Primary RPC: ${this.rpcUrl.split('?')[0].substring(0, 48)}`);
+        if (this.usingPublicRpc) {
+            console.warn('[SOLANA-RPC] ⚠️ Using the shared public RPC. It is rate limited and will cause missed signals and unconfirmed trades. Set SOLANA_RPC_URL to a keyed endpoint.');
         }
-        console.log(`[SOLANA-RPC] 🔌 Solana WebSocket endpoint active: ${this.wsEndpoint}`);
+        if (this.broadcastConnection) {
+            console.log('[SOLANA-RPC] 📡 Secondary broadcaster configured (send only, never used for reads).');
+        }
+        console.log(`[SOLANA-RPC] 🔌 WebSocket endpoint: ${this.wsEndpoint.split('?')[0].substring(0, 48)}`);
 
-        this.cachedSolPrice = 150;
+        // No invented default. Until a live price arrives this stays 0 and buys are blocked.
+        this.cachedSolPrice = 0;
+        this.solPriceUpdatedAt = 0;
+        this.solPriceSource = null;
         this.activeRpcSubscriptions = new Map();
         this.processedSignatures = new Set();
     }
 
+    /** Run a read on the primary RPC, then on the free fallback if the primary errors. */
+    async withFallback(fn) {
+        try {
+            return await fn(this.connection);
+        } catch (primaryErr) {
+            return await fn(this.fallbackConnection);
+        }
+    }
+
+    /** SOL balance, or null when no RPC could answer. Never returns a fake 0. */
     async getSolBalance(walletAddress) {
         try {
             const pubKey = new PublicKey(walletAddress);
-            // 1. Try Primary Public Connection
-            try {
-                const balance = await this.connection.getBalance(pubKey);
-                return balance / LAMPORTS_PER_SOL;
-            } catch (primaryErr) {
-                // 2. Try Secondary Public RPC
-                try {
-                    const secConn = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
-                    const balance = await secConn.getBalance(pubKey);
-                    return balance / LAMPORTS_PER_SOL;
-                } catch (secErr) {
-                    // 3. Dynamic Failover: Infura Paid RPC
-                    if (this.infuraConnection) {
-                        console.log(`[SOLANA-RPC] 🛡️ Public RPC balance check failed for ${walletAddress}. Dynamic failover engaged: using Infura paid RPC.`);
-                        const balance = await this.infuraConnection.getBalance(pubKey);
-                        return balance / LAMPORTS_PER_SOL;
-                    }
-                    throw secErr;
-                }
-            }
+            const lamports = await this.withFallback(conn => conn.getBalance(pubKey));
+            return lamports / LAMPORTS_PER_SOL;
         } catch (err) {
-            console.error("<::: Error fetching balance for", walletAddress, err.message);
-            return 0;
+            console.error('<::: Error fetching balance for', walletAddress, err.message);
+            return null;
         }
     }
 
+    /** Token balance across all of the wallet's accounts for a mint, or null when unknown. */
     async getTokenBalance(walletAddress, mint) {
-        if (!walletAddress || !mint) return 0;
+        if (!walletAddress || !mint) return null;
         try {
             const pubKey = new PublicKey(walletAddress);
             const mintKey = new PublicKey(mint);
-            const accounts = await this.connection.getParsedTokenAccountsByOwner(pubKey, { mint: mintKey });
-            if (accounts?.value?.length > 0) {
-                const amount = accounts.value[0].account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0;
-                return amount;
-            }
+            const accounts = await this.withFallback(conn => conn.getParsedTokenAccountsByOwner(pubKey, { mint: mintKey }));
+            return (accounts?.value || []).reduce(
+                (sum, a) => sum + (Number(a.account?.data?.parsed?.info?.tokenAmount?.uiAmountString) || 0),
+                0
+            );
         } catch (err) {
-            // Non-blocking fallback
+            return null; // unknown, NOT zero
         }
-        return 0;
+    }
+
+    async getLatestBlockhashSafe() {
+        const { blockhash } = await this.withFallback(conn => conn.getLatestBlockhash('confirmed'));
+        return blockhash;
+    }
+
+    /**
+     * Dry run a signed transaction before paying for it.
+     * Returns { ok, err, logs } or { skipped: true } if the RPC could not simulate.
+     */
+    async simulateSafe(tx) {
+        try {
+            const res = await this.connection.simulateTransaction(tx, {
+                sigVerify: false,
+                replaceRecentBlockhash: true,
+                commitment: 'confirmed'
+            });
+            const value = res?.value || {};
+            return { ok: !value.err, err: value.err || null, logs: value.logs || [] };
+        } catch (err) {
+            console.warn(`[SOLANA-RPC] ⚠️ Simulation unavailable (${err.message}). Sending without a dry run.`);
+            return { skipped: true, ok: true, err: null, logs: [] };
+        }
     }
 
     async sendTransactionSafe(tx, options = {}) {
-        const defaultOpts = {
-            skipPreflight: true,
-            preflightCommitment: "confirmed",
-            maxRetries: 5
-        };
-        const sendOpts = { ...defaultOpts, ...options };
+        const sendOpts = { skipPreflight: true, preflightCommitment: 'confirmed', maxRetries: 5, ...options };
+        const raw = tx.serialize();
 
-        // Dual-Engine Multi-RPC Racing: Broadcast to Infura Paid RPC & Primary RPC simultaneously
-        // Whichever validator gets it first will process it; duplicate submissions are deduplicated on-chain by signature.
-        const promises = [];
-
-        if (this.infuraConnection) {
-            promises.push(
-                this.infuraConnection.sendTransaction(tx, sendOpts).catch(err => {
-                    console.warn(`[SOLANA-RPC] ⚠️ Infura RPC sendTransaction notice: ${err.message}`);
-                    throw err;
-                })
-            );
-        }
-
-        if (this.connection) {
-            promises.push(
-                this.connection.sendTransaction(tx, sendOpts).catch(err => {
-                    console.warn(`[SOLANA-RPC] ⚠️ Primary RPC sendTransaction notice: ${err.message}`);
-                    throw err;
-                })
-            );
-        }
+        // Identical signed bytes go to every broadcaster. The network deduplicates by signature.
+        const targets = [this.connection, this.broadcastConnection].filter(Boolean);
+        const attempts = targets.map(conn => conn.sendRawTransaction(raw, sendOpts));
 
         try {
-            // Promise.any resolves as soon as ANY RPC endpoint accepts the transaction
-            const signature = await Promise.any(promises);
-            return signature;
+            return await Promise.any(attempts);
         } catch (multiErr) {
-            console.warn(`[SOLANA-RPC] ⚠️ Primary & Infura endpoints failed. Attempting fallback public RPC...`);
-            const secConn = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
-            return await secConn.sendTransaction(tx, sendOpts);
+            console.warn('[SOLANA-RPC] ⚠️ Primary broadcast failed. Trying the fallback RPC...');
+            return await this.fallbackConnection.sendRawTransaction(raw, sendOpts);
         }
+    }
+
+    /**
+     * Wait for a signature. 'unknown' means we could not find out in time,
+     * which is NOT the same as failed and must be reconciled by the caller.
+     */
+    async confirmSignature(signature, timeoutMs = 30000) {
+        if (!signature || typeof signature !== 'string') return { status: 'failed', err: 'INVALID_SIGNATURE' };
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            try {
+                const res = await this.withFallback(conn => conn.getSignatureStatuses([signature], { searchTransactionHistory: true }));
+                const status = res?.value?.[0];
+                if (status) {
+                    if (status.err) return { status: 'failed', err: status.err };
+                    if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
+                        return { status: 'confirmed', err: null };
+                    }
+                }
+            } catch (pollErr) {
+                // keep polling until the deadline
+            }
+            await new Promise(r => setTimeout(r, 1500));
+        }
+        return { status: 'unknown', err: 'TIMEOUT_NOT_CONFIRMED' };
+    }
+
+    /**
+     * Close the wallet's EMPTY token accounts for a mint and get the deposit back
+     * (about 0.002 SOL each). Accounts that still hold tokens are left alone.
+     */
+    async closeEmptyTokenAccounts(keypair, mint) {
+        const owner = keypair.publicKey;
+        const res = await this.withFallback(conn => conn.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) }));
+        const instructions = [];
+        let lamports = 0;
+        for (const acc of res?.value || []) {
+            const info = acc.account?.data?.parsed?.info;
+            const programId = acc.account?.owner;
+            if (!info || !programId || !TOKEN_PROGRAM_IDS.has(programId.toBase58())) continue;
+            if (info.tokenAmount?.amount !== '0') continue;
+            instructions.push(new TransactionInstruction({
+                programId,
+                keys: [
+                    { pubkey: acc.pubkey, isSigner: false, isWritable: true }, // account to close
+                    { pubkey: owner, isSigner: false, isWritable: true },      // deposit destination
+                    { pubkey: owner, isSigner: true, isWritable: false }       // authority
+                ],
+                data: Buffer.from([9]) // SPL Token: CloseAccount
+            }));
+            lamports += acc.account.lamports || 0;
+        }
+        if (instructions.length === 0) return { reclaimedSol: 0, signature: null };
+
+        const { blockhash, lastValidBlockHeight } = await this.withFallback(conn => conn.getLatestBlockhash('confirmed'));
+        const tx = new Transaction({ feePayer: owner, blockhash, lastValidBlockHeight }).add(...instructions);
+        tx.sign(keypair);
+        // Preflight stays ON here: if the close would fail, nothing is sent and nothing is paid.
+        const signature = await this.connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+        const result = await this.confirmSignature(signature, 20000);
+        if (result.status !== 'confirmed') return { reclaimedSol: 0, signature };
+        return { reclaimedSol: Math.max(0, lamports / LAMPORTS_PER_SOL - 0.000005), signature };
+    }
+
+    /** Fetch a live SOL price from independent sources. Returns null if none answered. */
+    async refreshSolPrice() {
+        const axios = require('axios');
+        const valid = p => Number.isFinite(p) && p > 1 && p < 100000;
+        const sources = [
+            ['jupiter', async () => {
+                const headers = process.env.JUPITER_API_KEY ? { 'x-api-key': process.env.JUPITER_API_KEY } : {};
+                const r = await axios.get('https://api.jup.ag/price/v3', { params: { ids: WSOL_MINT }, headers, timeout: 4000 });
+                return Number(r.data?.[WSOL_MINT]?.usdPrice);
+            }],
+            ['coingecko', async () => {
+                const r = await axios.get('https://api.coingecko.com/api/v3/simple/price', { params: { ids: 'solana', vs_currencies: 'usd' }, timeout: 4000 });
+                return Number(r.data?.solana?.usd);
+            }],
+            ['dexscreener', async () => {
+                const r = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${WSOL_MINT}`, { timeout: 4000 });
+                const pairs = (r.data?.pairs || [])
+                    .filter(p => p.chainId === 'solana' && p.baseToken?.address === WSOL_MINT && STABLE_MINTS.has(p.quoteToken?.address))
+                    .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                return Number(pairs[0]?.priceUsd);
+            }]
+        ];
+        for (const [name, fetchPrice] of sources) {
+            try {
+                const price = await fetchPrice();
+                if (valid(price)) {
+                    this.cachedSolPrice = price;
+                    this.solPriceUpdatedAt = Date.now();
+                    this.solPriceSource = name;
+                    return price;
+                }
+            } catch (err) {
+                // try the next source
+            }
+        }
+        return null;
     }
 
     async startSolPriceTracker() {
-        this.cachedSolPrice = 150;
-        const fetchPrice = async () => {
-            try {
-                const axios = require('axios');
-                const response = await axios.get('https://price.jup.ag/v6/price?ids=SOL');
-                if (response.data && response.data.data && response.data.data.SOL) {
-                    this.cachedSolPrice = response.data.data.SOL.price;
-                }
-            } catch (err) {
-                // Silent catch for background task
+        const tick = async () => {
+            const price = await this.refreshSolPrice();
+            if (price === null) {
+                const ageMin = this.solPriceUpdatedAt ? Math.round((Date.now() - this.solPriceUpdatedAt) / 60000) : null;
+                console.warn(`[SOLANA-RPC] ⚠️ No SOL price source answered. ${ageMin === null ? 'No price known yet, buys stay blocked.' : `Using the price from ${ageMin} min ago.`}`);
             }
         };
-        await fetchPrice();
-        setInterval(fetchPrice, 60000); // Update every 60 seconds
+        await tick();
+        if (this.cachedSolPrice) {
+            console.log(`[SOLANA-RPC] 💲 SOL price: $${this.cachedSolPrice.toFixed(2)} (${this.solPriceSource})`);
+        }
+        setInterval(tick, 60000);
     }
 
+    /** Last live SOL price, or 0 when none has been fetched yet. Never a made up number. */
     getSolPriceUSD() {
-        return this.cachedSolPrice || 150;
+        return this.cachedSolPrice || 0;
+    }
+
+    isSolPriceFresh(maxAgeMs = 10 * 60 * 1000) {
+        return this.cachedSolPrice > 0 && (Date.now() - this.solPriceUpdatedAt) <= maxAgeMs;
     }
 
     extractPubkeyString(keyEntry) {
@@ -199,8 +307,7 @@ class SolanaService {
                 try {
                     parsed = await this.connection.getParsedAccountInfo(mintPubkey);
                 } catch {
-                    const sec = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
-                    parsed = await sec.getParsedAccountInfo(mintPubkey);
+                    parsed = await this.fallbackConnection.getParsedAccountInfo(mintPubkey);
                 }
 
                 const extensions = parsed?.value?.data?.parsed?.info?.extensions;
@@ -229,8 +336,7 @@ class SolanaService {
                 try {
                     acc = await this.connection.getAccountInfo(pda);
                 } catch {
-                    const sec = new Connection('https://solana-rpc.publicnode.com', 'confirmed');
-                    acc = await sec.getAccountInfo(pda);
+                    acc = await this.fallbackConnection.getAccountInfo(pda);
                 }
 
                 if (acc && acc.data && acc.data.length > 70) {
@@ -259,7 +365,7 @@ class SolanaService {
 
     // Fetch transaction supporting Legacy, Version 0 (v0), and Version 1 (v1) transactions with retry & RPC fallback
     async fetchParsedTransactionSafe(signature, maxRetries = 3) {
-        const publicEndpoints = [this.rpcUrl, 'https://solana-rpc.publicnode.com'].filter(Boolean);
+        const publicEndpoints = [this.rpcUrl, FALLBACK_RPC].filter(Boolean);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             // 1. Try web3 connection on primary public RPC
             try {
@@ -302,38 +408,6 @@ class SolanaService {
                     }
                 } catch (rpcErr) {
                     // Try next public endpoint
-                }
-            }
-
-            // 3. Dynamic Emergency Fallback: If public RPCs failed, were rate-limited (429), or returned nothing
-            if (this.infuraRpcUrl) {
-                try {
-                    const res = await fetch(this.infuraRpcUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            jsonrpc: '2.0',
-                            id: 1,
-                            method: 'getTransaction',
-                            params: [
-                                signature,
-                                {
-                                    encoding: 'jsonParsed',
-                                    commitment: 'confirmed',
-                                    maxSupportedTransactionVersion: 1
-                                }
-                            ]
-                        })
-                    });
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data && data.result && data.result.meta) {
-                            console.log(`[SOLANA-RPC] 🛡️ Public RPC rate-limited/failed. Dynamic failover engaged: parsed tx ${signature.substring(0, 8)}... via Infura paid RPC.`);
-                            return data.result;
-                        }
-                    }
-                } catch (infuraErr) {
-                    console.warn(`[SOLANA-RPC] ⚠️ Infura RPC fallback attempt ${attempt} error:`, infuraErr.message);
                 }
             }
 
