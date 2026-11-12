@@ -62,8 +62,59 @@ const ActiveTradeSchema = new Schema(
     },
     source: {
       type: String,
-      enum: ["COPY_TRADE", "MILESTONE_SNIPE"],
+      enum: ["COPY_TRADE", "MILESTONE_SNIPE", "MANUAL_BUY_MORE", "MANUAL"],
       required: true,
+    },
+    // 'live' trades moved real funds. 'paper' trades are simulated fills.
+    mode: {
+      type: String,
+      enum: ["live", "paper"],
+      default: "live",
+    },
+    // ---- Real accounting, read from the confirmed transactions themselves ----
+    solSpent: {
+      type: Number, // all in SOL that left the wallet on buys (fees and deposit included)
+      default: 0,
+    },
+    solReceived: {
+      type: Number, // SOL that came back from sells, net of fees
+      default: 0,
+    },
+    tokensSold: {
+      type: Number,
+      default: 0,
+    },
+    feesSol: {
+      type: Number, // network + priority fees across every transaction of this trade
+      default: 0,
+    },
+    rentPaid: {
+      type: Number, // token account deposit paid on entry
+      default: 0,
+    },
+    rentReclaimed: {
+      type: Number, // deposit recovered when the token account was closed
+      default: 0,
+    },
+    entryPriceSol: {
+      type: Number, // SOL per token actually paid (deposit excluded)
+      default: 0,
+    },
+    tokenSupply: {
+      type: Number,
+      default: 0,
+    },
+    buySignature: {
+      type: String,
+    },
+    // True when a fill could not be read back. Such trades are kept but never counted in PnL stats.
+    accountingIncomplete: {
+      type: Boolean,
+      default: false,
+    },
+    sellSignatures: {
+      type: [String],
+      default: [],
     },
     mirroredWallet: {
       type: String, // If copied from a watched wallet

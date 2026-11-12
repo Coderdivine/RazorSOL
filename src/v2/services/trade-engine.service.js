@@ -1,13 +1,18 @@
 const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58');
-const { VersionedTransaction, Keypair, Connection, PublicKey } = require('@solana/web3.js');
+const { VersionedTransaction, Keypair, PublicKey } = require('@solana/web3.js');
 const solanaService = require('./solana.service');
 const WatchedWallet = require('../models/WatchedWallet');
 const TokenMetrics = require('../models/TokenMetrics');
 const ActiveTrade = require('../models/ActiveTrade');
 const WhalePosition = require('../models/WhalePosition');
+const { loadTradingConfig } = require('../config/trading');
+const {
+    computeTradeSize, parseOwnFill, describeTxError, paperFill, parseSellFraction,
+    curveBuyTokens, curveSellSol, OPEN_STATUSES, BASE_FEE_SOL, TOKEN_ACCOUNT_RENT_SOL
+} = require('../utils/trade-math');
 
-const { WALLET_PUBLIC_KEY, WALLET_PRIVATE_KEY, SOLANA_RPC_URL } = process.env;
+const { WALLET_PUBLIC_KEY, WALLET_PRIVATE_KEY } = process.env;
 
 function formatMarketCap(mcUSD) {
     if (!mcUSD || mcUSD <= 0) return 'Live on DEX';
@@ -38,13 +43,11 @@ function getTokenLinks(mint) {
 
 class TradeEngine {
     constructor() {
-        const defaultWss = "wss://api.mainnet-beta.solana.com";
-        const wsUrl = process.env.SOLANA_WSS_URL || defaultWss;
-        const configuredRpc = SOLANA_RPC_URL && !SOLANA_RPC_URL.includes('infura.io') ? SOLANA_RPC_URL : null;
-        this.connection = new Connection(configuredRpc || "https://api.mainnet-beta.solana.com", {
-            commitment: 'confirmed',
-            wsEndpoint: wsUrl
-        });
+        this.cfg = loadTradingConfig();
+        // Share the single RPC connection (and its one websocket) with the Solana service.
+        this.connection = solanaService.connection;
+        console.log(`[TRADE-ENGINE] ${this.cfg.isPaper ? '📝 PAPER MODE: fills are simulated, no funds move. Set TRADING_MODE=live to trade real funds.' : '🔴 LIVE MODE: real funds are traded.'}`);
+        console.log(`[TRADE-ENGINE] ⚙️ Sizing: ${(this.cfg.tradeFraction * 100).toFixed(0)}% of balance per trade, min ${this.cfg.minTradeSol} SOL, reserve ${this.cfg.reserveSol} SOL. Slippage: buy ${this.cfg.buySlippagePct}%, sell ${this.cfg.sellSlippagePct}%.`);
         // Base keys
         this.myWalletKey = WALLET_PUBLIC_KEY;
         this.myKeypair = null;
@@ -61,12 +64,17 @@ class TradeEngine {
         
         // Caching
         this.myBalance = 0;
+        this.myBalanceUpdatedAt = 0;
+        this.lastMcSol = new Map();          // mint -> { mc, t } freshest market cap seen (SOL)
+        this.lastTokenBalCheck = new Map();  // tradeId -> last on chain token balance check
         this.tokenCache = new Map(); // In-memory cache to prevent MongoDB flooding
         
         // Clear memory cache every 1 hour to prevent memory leaks from 1000s of tokens
         setInterval(() => {
             console.log(`[TRADE-ENGINE] 🧹 Clearing in-memory token cache (${this.tokenCache.size} tokens removed).`);
             this.tokenCache.clear();
+            const cutoff = Date.now() - 3600000;
+            for (const [k, v] of this.lastMcSol) if (v.t < cutoff) this.lastMcSol.delete(k);
         }, 3600000);
         
         // Settings & Thresholds
@@ -102,7 +110,9 @@ class TradeEngine {
             // Pre-seed current on-chain balance immediately so server boots/restarts NEVER trigger a fake duplicate alert
             try {
                 const currentBal = await solanaService.getSolBalance(this.myWalletKey);
+                if (currentBal === null) throw new Error('balance unavailable');
                 this.myBalance = currentBal;
+                this.myBalanceUpdatedAt = Date.now();
                 this.lastNotifiedBalance = currentBal;
                 this.isDepositListenerReady = true;
                 console.log(`[TRADE-ENGINE] 👁️ Real-time wallet funding listener attached to ${this.myWalletKey} (Starting Balance: ${currentBal.toFixed(4)} SOL)`);
@@ -116,21 +126,24 @@ class TradeEngine {
                 await this.handleBalanceUpdate(newBalance, 'Instant RPC WebSocket');
             }, 'confirmed');
 
-            // 2. Periodic polling every 15 seconds as failover
+            // 2. Slow safety poll. The websocket above does the real work, so this stays cheap on RPC credits.
             setInterval(async () => {
                 try {
                     const bal = await solanaService.getSolBalance(this.myWalletKey);
-                    await this.handleBalanceUpdate(bal, 'Periodic Poller');
+                    if (bal !== null) await this.handleBalanceUpdate(bal, 'Periodic Poller');
                 } catch (e) {
                     // Non-blocking
                 }
-            }, 15000);
+            }, this.cfg.balancePollMs);
         } catch (err) {
             console.error(`[TRADE-ENGINE] ❌ Error attaching wallet deposit listener:`, err.message);
         }
     }
 
     async handleBalanceUpdate(newBalance, source = 'RPC') {
+        // A failed read is "unknown", never a zero balance (that used to trigger fake deposit alerts).
+        if (newBalance === null || newBalance === undefined || !Number.isFinite(newBalance)) return;
+        this.myBalanceUpdatedAt = Date.now();
         if (!this.isDepositListenerReady) return;
         if (this.isHandlingDeposit) return;
 
@@ -159,7 +172,7 @@ class TradeEngine {
         this.lastNotifiedBalance = newBalance;
         this.myBalance = newBalance;
 
-        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const solPrice = solanaService.getSolPriceUSD();
         const usdVal = (newBalance * solPrice).toFixed(2);
         const depUsd = (deposited * solPrice).toFixed(2);
 
@@ -172,9 +185,8 @@ class TradeEngine {
 `🎉 Funds confirmed on Solana blockchain!\n` +
 `💰 *Deposit Detected:* \`+${deposited.toFixed(4)} SOL\` (~$${depUsd} USD)\n` +
 `💵 *Total Liquid Balance:* \`${newBalance.toFixed(4)} SOL\` (~$${usdVal} USD)\n` +
-`⚡ *Status:* 🟢 Armed & Ready for Trade\n` +
-`🎯 *Mode:* 1 Trade per Day (Full Allocation Mode)\n\n` +
-`_Razor is monitoring tracked whales and will enter the next qualified trade fully!_`;
+`⚡ *Status:* ${this.cfg.isPaper ? '📝 Paper mode (deposit will not be traded until TRADING_MODE=live)' : '🟢 Armed & Ready for Trade'}\n` +
+`🎯 *Sizing:* ${(this.cfg.tradeFraction * 100).toFixed(0)}% of balance per trade, one position at a time`;
 
             // STRICTLY send to Admin's private bot chat ONLY (never to channels or groups)
             await telegramService.sendAdminDirectMessage(depositAlert);
@@ -244,11 +256,21 @@ class TradeEngine {
         return this.watchlistThresholdUSD;
     }
 
-    async updateMyBalance() {
-        if(this.myWalletKey) {
-            this.myBalance = await solanaService.getSolBalance(this.myWalletKey);
-            console.log(`[TRADE-ENGINE] 💰 Updated local wallet balance: ${this.myBalance} SOL`);
+    /**
+     * Refresh the wallet balance. Pass maxAgeMs to reuse a recent value (the websocket
+     * keeps it current) instead of spending an RPC call. A failed read keeps the last
+     * known balance rather than pretending the wallet is empty.
+     */
+    async updateMyBalance(maxAgeMs = 0) {
+        if (!this.myWalletKey) return;
+        if (maxAgeMs > 0 && this.myBalanceUpdatedAt && (Date.now() - this.myBalanceUpdatedAt) < maxAgeMs) return;
+        const bal = await solanaService.getSolBalance(this.myWalletKey);
+        if (bal === null) {
+            console.warn(`[TRADE-ENGINE] ⚠️ Balance read failed. Keeping last known balance: ${this.myBalance} SOL`);
+            return;
         }
+        this.myBalance = bal;
+        this.myBalanceUpdatedAt = Date.now();
     }
 
     async handleNewToken(msg) {
@@ -290,6 +312,7 @@ class TradeEngine {
         
         // 1. Update Token MC and check for milestones
         if(mint && mc) {
+            this.lastMcSol.set(mint, { mc, t: Date.now() });
             await this.updateTokenMilestones(mint, mc);
         }
         
@@ -329,8 +352,7 @@ class TradeEngine {
         }
         try {
             const pubkey = new PublicKey(mint);
-            const conn = solanaService.infuraConnection || this.connection;
-            const acc = await conn.getParsedAccountInfo(pubkey);
+            const acc = await solanaService.withFallback(conn => conn.getParsedAccountInfo(pubkey));
             const info = acc?.value?.data?.parsed?.info;
             if (!info) {
                 return { isSafe: true, freezeAuthority: null, mintAuthority: null };
@@ -438,7 +460,7 @@ class TradeEngine {
         }
 
         // 4. Fallback for Market Cap if DexScreener did not return a value
-        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const solPrice = solanaService.getSolPriceUSD();
         if (liveMC <= 0) {
             if (fallbackMcSol && fallbackMcSol > 0) {
                 liveMC = fallbackMcSol * solPrice;
@@ -481,7 +503,7 @@ class TradeEngine {
         // Upsert valid token in MongoDB
         if (!isInvalid(finalName, finalSymbol)) {
             try {
-                const currentMCSol = liveMC > 0 ? (liveMC / solPrice) : 0;
+                const currentMCSol = (liveMC > 0 && solPrice > 0) ? (liveMC / solPrice) : 0;
                 await TokenMetrics.findOneAndUpdate(
                     { mint },
                     {
@@ -572,13 +594,14 @@ class TradeEngine {
             console.warn("[TRADE-ENGINE] ⚠️ Error querying WhalePosition:", findErr.message);
         }
 
+        // Declared out here because the mirror logic further down reads it too.
+        let sellRatio = 1.0;
         if (whalePos && whalePos.totalSolInvested > 0) {
             const enteredTotalSol = whalePos.totalSolInvested;
             const enteredTotalTokens = whalePos.totalTokensBought || 0;
             const tokensSoldNow = tradeEvent.tokenAmount || 0;
 
             // Determine proportion of position sold in this exit transaction
-            let sellRatio = 1.0;
             if (enteredTotalTokens > 0 && tokensSoldNow > 0) {
                 sellRatio = Math.min(1.0, tokensSoldNow / enteredTotalTokens);
             }
@@ -662,8 +685,9 @@ class TradeEngine {
                     console.log(`[TRADE-ENGINE] ℹ️ Whale Sell is micro-test/dust ($${receivedUsd.toFixed(2)}, ${(sellRatio * 100).toFixed(1)}% of bag). Skipping 100% position dump.`);
                     razorActionDesc = `⏸️ *Held Position* (Whale micro-test/dust: < $100 & < 15%)`;
                 } else {
-                    await this.updateMyBalance();
-                    if (this.myBalance >= 0.0005) {
+                    const allPaper = activeTrades.every(t => t.mode === 'paper');
+                    if (!allPaper) await this.updateMyBalance(3000);
+                    if (allPaper || this.myBalance >= 0.0005) {
                         console.log(`[TRADE-ENGINE] 🪞 Mirrored Whale Exit triggered for ${tradeEvent.mint}! Whale sold meaningful volume ($${receivedUsd.toFixed(0)}, ${(sellRatio * 100).toFixed(1)}%). Selling ALL (100%) remaining bag...`);
                         // Dynamic exit priority fee to front-run whale dumping if large volume
                         let exitPriorityFee = 0.0003;
@@ -683,7 +707,7 @@ class TradeEngine {
                                 trade.closeReason = "WHALE_MIRROR";
                                 await trade.save();
                             }
-                            razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ [Solscan](https://solscan.io/tx/${sellSig}))`;
+                            razorActionDesc = `🔴 *Sold 100%* (Mirrored Whale Exit ➔ ${this.txRef(sellSig)})`;
                         } else {
                             razorActionDesc = `⚠️ *Sell Attempted* (Broadcast pending)`;
                         }
@@ -813,7 +837,11 @@ class TradeEngine {
 
         // Parse Whale Buy Volume & USD Value
         const spentSol = tradeEvent.solAmount || 0;
-        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const solPrice = solanaService.getSolPriceUSD();
+        if (!solPrice) {
+            console.warn(`[TRADE-ENGINE] ⚠️ No live SOL price yet. Ignoring whale buy on ${tradeEvent.mint} rather than guessing its USD size.`);
+            return;
+        }
         const spentUSD = tradeEvent.usdAmount && tradeEvent.usdAmount > 1 
             ? tradeEvent.usdAmount 
             : (spentSol * solPrice);
@@ -856,7 +884,8 @@ class TradeEngine {
         // The 25% moonbag rides passively in the background, freeing our liquid SOL to enter the next qualified whale coin.
         if (canExecuteBuy) {
             const openTrade = await ActiveTrade.findOne({
-                status: { $in: ["OPEN", "REENTERED"] }
+                status: { $in: ["OPEN", "REENTERED"] },
+                ...this.modeFilter()
             });
             if (openTrade) {
                 canExecuteBuy = false;
@@ -865,7 +894,7 @@ class TradeEngine {
             }
         }
 
-        // 2. HONEYPOT & FREEZE AUTHORITY GUARD: Pre-buy security check via Infura Paid RPC
+        // 2. HONEYPOT & FREEZE AUTHORITY GUARD: Pre-buy security check
         if (canExecuteBuy) {
             const security = await this.checkTokenSecurity(tradeEvent.mint);
             if (!security.isSafe) {
@@ -875,18 +904,23 @@ class TradeEngine {
             }
         }
 
-        // 3. AVAILABLE LIQUID BALANCE CHECK: Must have liquid balance > $1 USD (minus 0.003 SOL gas reserve)
-        // User rule: "if there's available balance greater than $1 we can be able to buy next coin that comes instead of using date stamp. This is really what I mean by one trade a day."
-        await this.updateMyBalance();
-        const gasReserveSol = 0.003;
-        let myTradeSize = Math.max(0, this.myBalance - gasReserveSol);
-        const myTradeUsd = myTradeSize * solPrice;
-
-        if (myTradeUsd < 1.0 || myTradeSize < 0.005) {
+        // 3. PRICE FRESHNESS: never size or filter a trade on a stale SOL price.
+        if (canExecuteBuy && !solanaService.isSolPriceFresh(this.cfg.solPriceMaxAgeMs)) {
             canExecuteBuy = false;
-            skipReason = `Available balance ($${myTradeUsd.toFixed(2)} USD / ${this.myBalance.toFixed(4)} SOL) is below $1 minimum trade threshold.`;
+            skipReason = 'Live SOL price is stale. Buys are paused until a price source answers.';
+        }
+
+        // 4. POSITION SIZING: a fraction of the balance, with room left for the worst case fill,
+        // fees, the token account deposit and a reserve that pays for the exit.
+        const sizing = await this.sizeNextTrade();
+        const balanceForSizing = sizing.balanceSol;
+        const myTradeSize = sizing.sizeSol;
+        const myTradeUsd = myTradeSize * solPrice;
+        if (canExecuteBuy && myTradeSize <= 0) {
+            canExecuteBuy = false;
+            skipReason = sizing.reason;
         } else if (canExecuteBuy) {
-            console.log(`[TRADE-ENGINE] 🎯 FULL TRADE ALLOCATION: Entering next trade with full liquid balance: ${myTradeSize.toFixed(4)} SOL (~$${myTradeUsd.toFixed(2)} USD, Gas Reserve: ${gasReserveSol} SOL)`);
+            console.log(`[TRADE-ENGINE] 🎯 ${this.cfg.isPaper ? 'PAPER ' : ''}Trade size: ${myTradeSize.toFixed(4)} SOL (~$${myTradeUsd.toFixed(2)}) from a ${balanceForSizing.toFixed(4)} SOL balance.`);
         }
 
         const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
@@ -940,7 +974,7 @@ class TradeEngine {
         const telegramService = require('./telegram.service');
 
         let myActionDesc = canExecuteBuy
-            ? `🟢 *Copy-Buy Triggered* (Entering \`${myTradeSize.toFixed(4)} SOL\`)`
+            ? `${this.cfg.isPaper ? '📝 *Paper Buy*' : '🟢 *Copy-Buy Triggered*'} (Entering \`${myTradeSize.toFixed(4)} SOL\`)`
             : `⏸️ *Skipped* (${skipReason})`;
 
         const cleanAlertMsg =
@@ -992,7 +1026,7 @@ class TradeEngine {
             const maxSafeGasFee = Math.max(0.0001, myTradeSize * 0.015);
             const priorityFee = Number(Math.min(targetPriorityFee, maxSafeGasFee).toFixed(5));
 
-            console.log(`[TRADE-ENGINE] 🎯 QUALIFIED BUY: Whale spent $${spentUSD.toFixed(0)} (> $250) under $500k MC (${mcTracker})! Conviction: ${convictionTier} | Priority Fee: ${priorityFee} SOL (Profit Guard Active). Entering full liquid balance: ${myTradeSize.toFixed(4)} SOL...`);
+            console.log(`[TRADE-ENGINE] 🎯 QUALIFIED BUY: Whale spent $${spentUSD.toFixed(0)} (> $250) under $500k MC (${mcTracker})! Conviction: ${convictionTier} | Priority Fee: ${priorityFee} SOL (Profit Guard Active). Entering ${myTradeSize.toFixed(4)} SOL...`);
             await this.executeTradeLocal(tradeEvent.mint, "buy", myTradeSize, true, priorityFee, "COPY_TRADE", watchedWallet.walletAddress, null, false, convictionTier);
         } else {
             console.log(`[TRADE-ENGINE] ℹ️ Buy trade execution skipped: ${skipReason}`);
@@ -1001,29 +1035,37 @@ class TradeEngine {
 
     async pollActiveTradesForTPSL() {
         try {
-            const activeTrades = await ActiveTrade.find({
-                status: { $in: ["OPEN", "PARTIAL_TP_1_4X", "PARTIAL_TP_2X", "REENTERED"] }
-            });
+            const activeTrades = await ActiveTrade.find({ status: { $in: OPEN_STATUSES } });
             if (!activeTrades || activeTrades.length === 0) return;
 
-            await this.updateMyBalance();
-            if (this.myBalance < 0.0005) {
-                return; // Unfunded wallet, skip polling until funded
-            }
+            const solPrice = solanaService.getSolPriceUSD();
+            if (!solPrice) return; // no live price, do not evaluate exits on a guess
 
-            const solPrice = solanaService.getSolPriceUSD() || 150;
+            const hasLive = activeTrades.some(t => t.mode !== 'paper');
+            if (hasLive) await this.updateMyBalance(60000);
 
             for (const trade of activeTrades) {
                 try {
-                    // If wallet holds zero tokens and trade is older than 5 minutes, auto-close
-                    if (this.myWalletKey) {
-                        const tokenBal = await solanaService.getTokenBalance(this.myWalletKey, trade.mint);
-                        if (tokenBal <= 0 && (Date.now() - new Date(trade.createdAt).getTime()) > 300000) {
-                            trade.status = "CLOSED";
-                            trade.closeReason = "ZERO_TOKEN_BALANCE";
-                            trade.closedAt = new Date();
-                            await trade.save();
-                            continue;
+                    const isPaper = trade.mode === 'paper';
+                    if (!isPaper) {
+                        if (this.myBalance < 0.0005) continue; // cannot pay for an exit until funded
+
+                        // Check the real token balance occasionally, not on every 10s tick.
+                        const id = trade._id.toString();
+                        const last = this.lastTokenBalCheck.get(id) || 0;
+                        if (this.myWalletKey && (Date.now() - last) >= this.cfg.tokenBalancePollMs) {
+                            this.lastTokenBalCheck.set(id, Date.now());
+                            const tokenBal = await solanaService.getTokenBalance(this.myWalletKey, trade.mint);
+                            // Only a CONFIRMED zero closes the trade. A failed read (null) never does.
+                            if (tokenBal !== null && tokenBal <= 0 && (Date.now() - new Date(trade.createdAt).getTime()) > 300000) {
+                                trade.status = "CLOSED";
+                                trade.closeReason = "ZERO_TOKEN_BALANCE";
+                                trade.closedAt = new Date();
+                                trade.accountingIncomplete = true; // tokens left the wallet outside the bot
+                                await trade.save();
+                                this.lastTokenBalCheck.delete(id);
+                                continue;
+                            }
                         }
                     }
 
@@ -1046,8 +1088,9 @@ class TradeEngine {
 
         if (!this.tradeExecutionLocks) this.tradeExecutionLocks = new Set();
 
-        const solPrice = solanaService.getSolPriceUSD() || 150;
+        const solPrice = solanaService.getSolPriceUSD();
         const currentMC_USD = currentMC * solPrice;
+        this.lastMcSol.set(mint, { mc: currentMC, t: Date.now() });
 
         const activeTrades = await ActiveTrade.find({
             mint,
@@ -1063,12 +1106,15 @@ class TradeEngine {
 
             // Ensure entryMarketCap is valid
             if (!trade.entryMarketCap || trade.entryMarketCap <= 0) {
-                if (trade.entryMarketCapUSD && trade.entryMarketCapUSD > 0) {
+                if (trade.entryMarketCapUSD && trade.entryMarketCapUSD > 0 && solPrice > 0) {
                     trade.entryMarketCap = trade.entryMarketCapUSD / solPrice;
-                    await trade.save();
                 } else {
-                    continue;
+                    // No entry reference was recorded. Start measuring from this price instead of
+                    // leaving the position with no exit rules at all.
+                    trade.entryMarketCap = currentMC;
+                    console.warn(`[TRADE-ENGINE] ⚠️ ${mint} had no entry reference. Exit rules now measure from ${currentMC.toFixed(2)} SOL market cap.`);
                 }
+                await trade.save();
             }
 
             const entryMC = trade.entryMarketCap; // in SOL
@@ -1323,336 +1369,562 @@ class TradeEngine {
         }
     }
 
-    async confirmTransactionSafe(signature, maxWaitMs = 15000) {
-        if (!signature || typeof signature !== 'string') return { confirmed: false, err: 'INVALID_SIGNATURE' };
-        const start = Date.now();
-        console.log(`[TRADE-ENGINE] ⏳ Verifying on-chain confirmation for ${signature.substring(0, 8)}...`);
-        
-        while (Date.now() - start < maxWaitMs) {
-            try {
-                const statusRes = await solanaService.connection.getSignatureStatus(signature, {
-                    searchTransactionHistory: true
-                });
-                const status = statusRes?.value;
-                if (status) {
-                    if (status.err) {
-                        console.error(`[TRADE-ENGINE] ❌ Transaction failed on-chain! Error:`, JSON.stringify(status.err));
-                        return { confirmed: false, err: status.err };
-                    }
-                    if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
-                        console.log(`[TRADE-ENGINE] 🎯 Transaction CONFIRMED on-chain! Status: ${status.confirmationStatus}`);
-                        return { confirmed: true, err: null };
-                    }
-                }
-            } catch (pollErr) {
-                // Non-blocking poll retry
-            }
-            await new Promise(r => setTimeout(r, 1200));
-        }
-
-        // Final failover check via parsed transaction
+    /** Live bonding curve reserves for a pump.fun token, or null if unavailable or migrated. */
+    async readBondingCurve(mint) {
+        if (!mint || typeof mint !== 'string' || !mint.endsWith('pump')) return null;
         try {
-            const tx = await solanaService.fetchParsedTransactionSafe(signature);
-            if (tx && tx.meta) {
-                if (tx.meta.err) {
-                    console.error(`[TRADE-ENGINE] ❌ Transaction failed on-chain! Error:`, JSON.stringify(tx.meta.err));
-                    return { confirmed: false, err: tx.meta.err };
-                }
-                return { confirmed: true, err: null };
-            }
-        } catch {}
-
-        console.warn(`[TRADE-ENGINE] ⚠️ Transaction ${signature.substring(0, 8)}... not confirmed within timeout. Treating as unconfirmed.`);
-        return { confirmed: false, err: 'TIMEOUT_NOT_CONFIRMED' };
+            const pub = new PublicKey(mint);
+            const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+            const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), pub.toBuffer()], PUMP_PROGRAM);
+            const acc = await solanaService.connection.getAccountInfo(bondingCurve);
+            if (!acc || !acc.data || acc.data.length < 49) return null;
+            const curve = {
+                virtualTokenReserves: Number(acc.data.readBigUInt64LE(8)),
+                virtualSolReserves: Number(acc.data.readBigUInt64LE(16)),
+                complete: acc.data.readUInt8(48) === 1
+            };
+            if (curve.complete || curve.virtualTokenReserves <= 0 || curve.virtualSolReserves <= 0) return null;
+            return curve;
+        } catch {
+            return null;
+        }
     }
 
-    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD', forcePool = null) {
-        if(!this.myKeypair) {
-            console.error("[TRADE-ENGINE] ❌ Missing Wallet Private Key. Cannot execute trade.");
-            return null;
-        }
-
-        await this.updateMyBalance();
-        if (action === "buy" && this.myBalance < 0.005) {
-            console.log(`[TRADE-ENGINE] ℹ️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast for ${mint}.`);
-            return null;
-        }
-        if (action === "sell" && this.myBalance < 0.0005) {
-            console.log(`[TRADE-ENGINE] ℹ️ Insufficient balance for network gas fee (${this.myBalance.toFixed(4)} SOL). Skipping sell broadcast for ${mint}.`);
-            return null;
-        }
-
-        // On-chain token balance verification: Never broadcast a sell if wallet has already liquidated the token
-        if (action === "sell") {
+    /** Best current market cap in SOL for a token, from the freshest source we have. */
+    async getCurrentMcSol(mint) {
+        const cached = this.lastMcSol.get(mint);
+        if (cached && (Date.now() - cached.t) < 20000) return cached.mc;
+        const solPrice = solanaService.getSolPriceUSD();
+        if (solPrice > 0) {
             try {
-                const tokenBal = await solanaService.getTokenBalance(this.myWalletKey, mint);
-                if (tokenBal <= 0) {
-                    console.log(`[TRADE-ENGINE] ℹ️ Zero token balance on-chain for ${mint}. Token already liquidated; skipping redundant sell broadcast.`);
-                    if (tradeId) {
-                        const trade = await ActiveTrade.findById(tradeId);
-                        if (trade && trade.status !== "CLOSED") {
-                            trade.status = "CLOSED";
-                            trade.closedAt = new Date();
-                            trade.closeReason = source;
-                            await trade.save();
-                        }
-                    }
-                    return null;
+                const meta = await this.resolveTokenMetadata(mint);
+                if (meta && meta.marketCapUSD > 0) {
+                    const mc = meta.marketCapUSD / solPrice;
+                    this.lastMcSol.set(mint, { mc, t: Date.now() });
+                    return mc;
                 }
-            } catch (balErr) {
-                // Non-blocking fallback
+            } catch {}
+        }
+        return cached ? cached.mc : 0;
+    }
+
+    /** Size the next buy from the live (or paper) balance. Returns { sizeSol, reason, balanceSol }. */
+    async sizeNextTrade() {
+        let balanceSol;
+        if (this.cfg.isPaper) {
+            balanceSol = await this.getPaperBalance();
+        } else {
+            await this.updateMyBalance(5000);
+            balanceSol = this.myBalance;
+        }
+        const sizing = computeTradeSize({
+            balanceSol,
+            fraction: this.cfg.tradeFraction,
+            minTradeSol: this.cfg.minTradeSol,
+            maxTradeSol: this.cfg.maxTradeSol,
+            reserveSol: this.cfg.reserveSol,
+            slippagePct: this.cfg.buySlippagePct
+        });
+        return { ...sizing, balanceSol };
+    }
+
+    /** Markdown reference for a fill: a Solscan link for real transactions, a label for paper ones. */
+    txRef(signature) {
+        return String(signature || '').startsWith('PAPER-')
+            ? '🧪 simulated, paper mode'
+            : `[View on Solscan](https://solscan.io/tx/${signature})`;
+    }
+
+    /** Filter that keeps paper and live trades from blocking or closing each other. */
+    modeFilter(mode = this.cfg.mode) {
+        return mode === 'paper' ? { mode: 'paper' } : { mode: { $ne: 'paper' } };
+    }
+
+    /** Virtual balance for paper mode: starting stake plus everything paper trades made or lost. */
+    async getPaperBalance() {
+        try {
+            const rows = await ActiveTrade.aggregate([
+                { $match: { mode: 'paper' } },
+                { $group: { _id: null, spent: { $sum: '$solSpent' }, received: { $sum: '$solReceived' }, rent: { $sum: '$rentReclaimed' } } }
+            ]);
+            const r = rows[0] || { spent: 0, received: 0, rent: 0 };
+            return Math.max(0, this.cfg.paperStartSol + (r.received || 0) + (r.rent || 0) - (r.spent || 0));
+        } catch (e) {
+            return this.cfg.paperStartSol;
+        }
+    }
+
+    /** Tell the admin WHY an order did not go through. Never silent. */
+    async notifyFailure(action, mint, reason, detail = '') {
+        console.error(`[TRADE-ENGINE] ❌ ${action.toUpperCase()} failed for ${mint}: ${reason}${detail ? ` (${detail})` : ''}`);
+        try {
+            const telegramService = require('./telegram.service');
+            const clean = t => String(t).replace(/[_*`\[\]]/g, ' ');
+            await telegramService.sendAdminDirectMessage(
+`❌ *${action.toUpperCase()} DID NOT EXECUTE*\n` +
+`🏷️ *CA:* \`${mint}\`\n` +
+`🧾 *Reason:* ${clean(reason)}` +
+(detail ? `\nℹ️ ${clean(detail)}` : '')
+            );
+        } catch {}
+    }
+
+    /** Kept for older call sites. 'unknown' is reported separately from 'failed'. */
+    async confirmTransactionSafe(signature, maxWaitMs = this.cfg.confirmTimeoutMs) {
+        const res = await solanaService.confirmSignature(signature, maxWaitMs);
+        return { confirmed: res.status === 'confirmed', unknown: res.status === 'unknown', err: res.err };
+    }
+
+    /**
+     * Simulated order. Prices come from the live bonding curve when the token is
+     * still on it (so our own price impact is included), otherwise from the live
+     * market cap. Assumed slippage and fees are then applied on top.
+     */
+    async executePaperTrade({ mint, action, amount, priorityFee, source, mirroredWallet, trade, tradeId, isReentry, convictionTier }) {
+        const supply = (trade && trade.tokenSupply) || await solanaService.getTokenSupplySafe(mint);
+        const fee = this.cfg.paperFeePct / 100;
+        const slip = this.cfg.paperSlippagePct / 100;
+        let fill = null;
+        let priceSource = 'market cap';
+
+        const curve = await this.readBondingCurve(mint);
+        if (action === 'buy') {
+            const balance = await this.getPaperBalance();
+            if (balance < amount + this.cfg.reserveSol) {
+                console.log(`[TRADE-ENGINE] 📝 Paper balance ${balance.toFixed(4)} SOL cannot fund a ${amount} SOL buy. Skipped.`);
+                return null;
+            }
+            if (curve) {
+                const q = curveBuyTokens(curve, amount * (1 - fee));
+                if (q) {
+                    const tokens = q.tokensOut * (1 - slip);
+                    fill = { solDelta: -(amount + BASE_FEE_SOL + priorityFee + TOKEN_ACCOUNT_RENT_SOL), tokenDelta: tokens, feeSol: BASE_FEE_SOL + priorityFee, rentSol: TOKEN_ACCOUNT_RENT_SOL };
+                    priceSource = 'bonding curve';
+                }
+            }
+            if (!fill) {
+                const mcSol = await this.getCurrentMcSol(mint);
+                fill = supply > 0 && mcSol > 0
+                    ? paperFill({ action: 'buy', amountSol: amount, priceSolPerToken: mcSol / supply, slippagePct: this.cfg.paperSlippagePct, feePct: this.cfg.paperFeePct, priorityFeeSol: priorityFee })
+                    : null;
+            }
+        } else {
+            if (!trade) {
+                console.log(`[TRADE-ENGINE] 📝 Paper sell requested for ${mint} but there is no paper position.`);
+                return null;
+            }
+            const remaining = Math.max(0, (trade.tokensReceived || 0) - (trade.tokensSold || 0));
+            const fraction = parseSellFraction(amount);
+            if (remaining <= 0) {
+                if (trade.status !== 'CLOSED') {
+                    trade.status = 'CLOSED';
+                    trade.closedAt = new Date();
+                    trade.closeReason = source;
+                    await trade.save();
+                }
+                return null;
+            }
+            if (curve) {
+                const q = curveSellSol(curve, remaining * fraction);
+                if (q) {
+                    const sol = q.solOut * (1 - fee) * (1 - slip) - BASE_FEE_SOL - priorityFee;
+                    fill = { solDelta: sol, tokenDelta: -(remaining * fraction), feeSol: BASE_FEE_SOL + priorityFee, rentSol: 0 };
+                    priceSource = 'bonding curve';
+                }
+            }
+            if (!fill) {
+                const mcSol = await this.getCurrentMcSol(mint);
+                fill = supply > 0 && mcSol > 0
+                    ? paperFill({ action: 'sell', sellFraction: fraction, remainingTokens: remaining, priceSolPerToken: mcSol / supply, slippagePct: this.cfg.paperSlippagePct, feePct: this.cfg.paperFeePct, priorityFeeSol: priorityFee })
+                    : null;
             }
         }
-        
-        try {
-            // Determine pool: check on-chain if bonding curve is complete to route to pump-amm (Raydium) directly
-            let targetPool = forcePool || "auto";
-            if (!forcePool && mint && mint.endsWith('pump')) {
-                try {
-                    const curve = await this.checkBondingCurveStatus(mint);
-                    if (curve && curve.isComplete) {
-                        targetPool = "pump-amm";
-                        console.log(`[TRADE-ENGINE] 🎓 Token ${mint} completed bonding curve on-chain. Routing ${action.toUpperCase()} to PumpSwap/Raydium AMM pool!`);
-                    }
-                } catch {}
+
+        if (!fill) {
+            await this.notifyFailure(action, mint, 'No live price available to simulate this order', 'Paper mode. Nothing was sent.');
+            return null;
+        }
+
+        const signature = `PAPER-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        console.log(`[TRADE-ENGINE] 📝 PAPER ${action.toUpperCase()} ${mint} via ${priceSource}: SOL ${fill.solDelta.toFixed(5)}, tokens ${fill.tokenDelta.toFixed(2)}`);
+        await this.recordFill({ mode: 'paper', mint, action, amount, fill, signature, source, mirroredWallet, trade, tradeId, isReentry, convictionTier, priorityFee, supply });
+        return signature;
+    }
+
+    /**
+     * Single place where a confirmed (or simulated) fill is written to the database
+     * and announced. Everything the stats show comes from what is recorded here.
+     */
+    async recordFill({ mode, mint, action, amount, fill, signature, source, mirroredWallet, trade, tradeId, isReentry, convictionTier, priorityFee, supply }) {
+        const telegramService = require('./telegram.service');
+        const isPaper = mode === 'paper';
+        const tag = isPaper ? '📝 *[PAPER]*' : '*[MY TRADE]*';
+        const solPrice = solanaService.getSolPriceUSD();
+        const tokenData = await this.resolveTokenMetadata(mint);
+        const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
+        const links = getTokenLinks(mint);
+        const txLine = isPaper
+            ? `🧪 *Simulated fill.* No funds moved.`
+            : `🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})`;
+
+        if (action === 'buy') {
+            const tokenSupply = supply || await solanaService.getTokenSupplySafe(mint);
+            const hasFill = Boolean(fill) && fill.tokenDelta > 0 && fill.solDelta < 0;
+            const solSpent = hasFill ? -fill.solDelta : 0;
+            const rentPaid = hasFill ? (fill.rentSol || 0) : 0;
+            const tokens = hasFill ? fill.tokenDelta : 0;
+            const feesSol = hasFill ? (fill.feeSol || 0) : 0;
+
+            // Entry reference = what WE paid, not a market snapshot taken later.
+            let entryPriceSol = hasFill ? (solSpent - rentPaid) / tokens : 0;
+            let entryMcSol = entryPriceSol > 0 && tokenSupply > 0 ? entryPriceSol * tokenSupply : 0;
+            if (entryMcSol <= 0) entryMcSol = await this.getCurrentMcSol(mint);
+            const entryMcUsd = entryMcSol * solPrice;
+
+            const existing = trade && trade.status !== 'CLOSED'
+                ? trade
+                : await ActiveTrade.findOne({ mint, status: { $in: OPEN_STATUSES }, ...this.modeFilter(mode) }).sort({ createdAt: -1 });
+
+            if (existing && (isReentry || source === 'MANUAL_BUY_MORE')) {
+                // Adding to a position: blend the entry so the exit rules measure against the true average cost.
+                const totalTokens = (existing.tokensReceived || 0) + tokens;
+                const totalCost = (existing.solSpent || 0) - (existing.rentPaid || 0) + (solSpent - rentPaid);
+                existing.solSpent = (existing.solSpent || 0) + solSpent;
+                existing.rentPaid = (existing.rentPaid || 0) + rentPaid;
+                existing.tokensReceived = totalTokens;
+                existing.feesSol = (existing.feesSol || 0) + feesSol;
+                existing.amountSolInvested = (existing.amountSolInvested || 0) + (Number(amount) || 0);
+                if (hasFill && existing.entryPriceSol > 0 && totalTokens > 0) {
+                    existing.entryPriceSol = totalCost / totalTokens;
+                    existing.entryMarketCap = existing.entryPriceSol * (existing.tokenSupply || tokenSupply);
+                    existing.entryMarketCapUSD = existing.entryMarketCap * solPrice;
+                }
+                if (!hasFill) existing.accountingIncomplete = true;
+                if (isReentry) existing.status = 'REENTERED';
+                await existing.save();
+                console.log(`[TRADE-ENGINE] 🔄 Added to existing ${mode} position ${existing._id} for ${mint}.`);
+            } else {
+                const allowedSources = ['COPY_TRADE', 'MILESTONE_SNIPE', 'MANUAL_BUY_MORE', 'MANUAL'];
+                await ActiveTrade.create({
+                    mint,
+                    tokenName,
+                    mode,
+                    entryPrice: tokenSupply > 0 ? entryMcUsd / tokenSupply : 0,
+                    entryMarketCap: entryMcSol,
+                    entryMarketCapUSD: entryMcUsd,
+                    amountSolInvested: Number(amount) || 0,
+                    tokensReceived: tokens,
+                    solSpent,
+                    rentPaid,
+                    feesSol,
+                    entryPriceSol,
+                    tokenSupply,
+                    buySignature: signature,
+                    accountingIncomplete: !hasFill,
+                    status: 'OPEN',
+                    source: allowedSources.includes(source) ? source : 'MANUAL',
+                    mirroredWallet,
+                    convictionTier,
+                    priorityFeePaid: priorityFee
+                });
+                console.log(`[TRADE-ENGINE] 💾 Saved ${mode} trade for ${mint}. Entry MC ${entryMcSol.toFixed(2)} SOL, all in cost ${solSpent.toFixed(5)} SOL${hasFill ? '' : ' (fill data missing, excluded from stats)'}.`);
+                if (!entryMcSol) {
+                    await this.notifyFailure('buy', mint, 'Position opened but no entry price could be established', 'Exit rules will start measuring from the next price update.');
+                }
             }
 
-            console.log(`[TRADE-ENGINE] 📡 Sending ${action.toUpperCase()} (${amount}) payload to PumpPortal for ${mint} [Pool: ${targetPool}]`);
-            const response = await axios.post("https://pumpportal.fun/api/trade-local", {
-                publicKey: this.myWalletKey,
-                action,
-                mint,
-                amount,
-                denominatedInSol: denominatedInSol ? "true" : "false",
-                slippage: action === "sell" ? 40 : 35,
-                priorityFee,
-                pool: targetPool
-            }, {
-                responseType: 'arraybuffer'
-            });
-            
-            if(response.status === 200) {
-                const buffer = Buffer.from(response.data);
-                
-                // Safety check: PumpPortal might return a JSON error string
-                const asText = buffer.toString('utf8');
-                if (asText.startsWith('{') && asText.includes('"error"')) {
-                    try {
-                        const errObj = JSON.parse(asText);
-                        console.error("[TRADE-ENGINE] ❌ PumpPortal API Error:", errObj.error || asText);
-                        return null;
-                    } catch {}
-                }
+            const wsService = require('./pumpportal.service');
+            wsService.watchToken(mint);
 
-                console.log(`[TRADE-ENGINE] 📝 Received raw transaction from PumpPortal. Refreshing blockhash & signing...`);
-                const txBytes = new Uint8Array(buffer);
-                const tx = VersionedTransaction.deserialize(txBytes);
+            const modeDesc = source === 'COPY_TRADE'
+                ? `Mirrored Whale [\`${mirroredWallet ? mirroredWallet.substring(0, 4) + '...' + mirroredWallet.substring(mirroredWallet.length - 4) : 'Whale'}\`](https://solscan.io/account/${mirroredWallet})`
+                : (source === 'MILESTONE_SNIPE' ? '🔫 Milestone Snipe' : 'Manual');
+            const costLine = hasFill
+                ? `💰 *All In Cost:* \`${solSpent.toFixed(5)} SOL\`${solPrice ? ` (~$${(solSpent * solPrice).toFixed(2)})` : ''}\n📦 *Tokens:* \`${tokens.toLocaleString('en-US', { maximumFractionDigits: 0 })}\`\n⛽ *Fees:* \`${feesSol.toFixed(6)} SOL\` + \`${rentPaid.toFixed(5)} SOL\` refundable deposit`
+                : `💰 *Order Size:* \`${Number(amount).toFixed(4)} SOL\` (fill details unavailable)`;
 
-                // CRITICAL FIX: PumpPortal API caches and returns stale blockhashes that fail simulation with "Blockhash not found".
-                // We fetch a fresh, live blockhash directly from our RPC connection before signing.
-                try {
-                    let freshBlockhash = null;
-                    if (solanaService.infuraConnection) {
-                        try {
-                            const { blockhash } = await solanaService.infuraConnection.getLatestBlockhash('confirmed');
-                            freshBlockhash = blockhash;
-                        } catch (infuraBhErr) {
-                            const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
-                            freshBlockhash = blockhash;
-                        }
-                    } else {
-                        const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
-                        freshBlockhash = blockhash;
-                    }
-                    if (freshBlockhash) {
-                        tx.message.recentBlockhash = freshBlockhash;
-                        console.log(`[TRADE-ENGINE] 🔄 Injected fresh on-chain blockhash: ${freshBlockhash.substring(0, 8)}...`);
-                    }
-                } catch (bhErr) {
-                    console.warn("[TRADE-ENGINE] ⚠️ Could not fetch fresh blockhash, falling back to original:", bhErr.message);
-                }
-
-                tx.sign([this.myKeypair]);
-                
-                console.log(`[TRADE-ENGINE] 📤 Broadcasting signed transaction to Solana network via multi-RPC racing...`);
-                let signature;
-                try {
-                    signature = await solanaService.sendTransactionSafe(tx, {
-                        skipPreflight: true,
-                        preflightCommitment: "confirmed",
-                        maxRetries: 5
-                    });
-                    console.log(`[TRADE-ENGINE] 📡 Transaction broadcast! Sig: ${signature}. Awaiting on-chain confirmation...`);
-                } catch (sendErr) {
-                    console.error("[TRADE-ENGINE] ❌ Solana RPC sendTransaction error across all endpoints:", sendErr.message);
-                    return null;
-                }
-
-                // CRITICAL FIX: NEVER ASSUME TRANSACTION SUCCEEDED!
-                // Verify on-chain execution with getSignatureStatus before recording ActiveTrade or dispatching Telegram alert.
-                const confirmation = await this.confirmTransactionSafe(signature);
-                if (!confirmation.confirmed) {
-                    const errStr = JSON.stringify(confirmation.err || '');
-                    console.error(`[TRADE-ENGINE] ❌ Transaction ${signature} failed on-chain or was dropped (${errStr}). Suppressing confirmed alert.`);
-
-                    // If error is Custom: 6005 (BondingCurveComplete), token graduated right as trade was being processed.
-                    // Automatically retry once targeting the migrated AMM pool (pump-amm):
-                    if (errStr.includes('6005') && targetPool !== 'pump-amm') {
-                        console.log(`[TRADE-ENGINE] 🔄 Token completed bonding curve mid-flight. Automatically retrying ${action.toUpperCase()} on pump-amm pool...`);
-                        return await this.executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet, tradeId, isReentry, convictionTier, 'pump-amm');
-                    }
-
-                    if (action === "buy") {
-                        console.warn(`[TRADE-ENGINE] 🛑 BUY transaction did not execute on-chain. ActiveTrade NOT created.`);
-                    }
-                    return null;
-                }
-
-                console.log(`[TRADE-ENGINE] ✅ Transaction VERIFIED & CONFIRMED on-chain! Signature: https://solscan.io/tx/${signature}`);
-                
-                const telegramService = require('./telegram.service');
-
-                if(action === "buy") {
-                    const tokenData = await this.resolveTokenMetadata(mint);
-                    const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
-                    const links = getTokenLinks(mint);
-                    let modeDesc = source === 'COPY_TRADE' 
-                        ? `Mirrored Whale [\`${mirroredWallet ? mirroredWallet.substring(0,4)+'...'+mirroredWallet.substring(mirroredWallet.length-4) : 'Whale'}\`](https://solscan.io/account/${mirroredWallet})`
-                        : '🔫 5K Milestone Snipe ($10k ➔ $50k)';
-
-                    let convictionDesc = '';
-                    if (convictionTier === 'MASSIVE_CONVICTION') {
-                        convictionDesc = `\n⚡ *Whale Conviction:* 🚀 *Massive ($5,000+)* — 10x Front-Run Fast Track`;
-                    } else if (convictionTier === 'ELEVATED_CONVICTION') {
-                        convictionDesc = `\n⚡ *Whale Conviction:* 🔥 *Elevated ($2,500+)* — 3x Priority`;
-                    }
-
-                    const buyAlertAdmin =
-`🟢🚀 *[MY TRADE] RAZOR BOT BUY CONFIRMED* ⚡🟢\n` +
+            const buyAlertAdmin =
+`🟢 ${tag} *RAZOR BUY ${isPaper ? 'SIMULATED' : 'CONFIRMED'}*\n` +
 `━━━━━━━━━━━━━━━━━━━━\n` +
-`✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
-`💰 *My Investment:* \`${amount.toFixed(4)} SOL\`\n` +
-`🎯 *Mode:* ${modeDesc}${convictionDesc}\n` +
-`⛽ *Priority Fee:* \`${priorityFee} SOL\` (Profit Guard Protected)\n` +
-`🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
+`${costLine}\n` +
+`📈 *Entry MC:* ${formatMarketCap(entryMcUsd)}\n` +
+`🎯 *Mode:* ${modeDesc}\n` +
+`${txLine}\n` +
 `━━━━━━━━━━━━━━━━━━━━`;
 
-                    // Public group gets clean alert with private whale address masked
-                    const buyAlertGroup =
+            const buyAlertGroup = isPaper ? null :
 `🟢🚀 *[MY TRADE] RAZOR BOT BUY CONFIRMED* ⚡🟢\n` +
 `━━━━━━━━━━━━━━━━━━━━\n` +
 `✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
-`💰 *Trade Size:* \`${amount.toFixed(4)} SOL\`\n` +
+`💰 *Trade Size:* \`${Number(amount).toFixed(4)} SOL\`\n` +
 `🎯 *Strategy:* 🎯 Top Trader Mirror Snipe\n` +
 `🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
 `━━━━━━━━━━━━━━━━━━━━`;
 
-                    // Send to BOTH admin DM (full details) and public group/channel (masked)
-                    telegramService.sendAlert(buyAlertAdmin, buyAlertGroup, mint);
+            // Paper fills go to the admin only. The public channel never sees a simulated trade as a real one.
+            if (isPaper) await telegramService.sendAdminDirectMessage(buyAlertAdmin);
+            else telegramService.sendAlert(buyAlertAdmin, buyAlertGroup, mint);
+            return;
+        }
 
-                    if(isReentry && tradeId) {
-                        const trade = await ActiveTrade.findById(tradeId);
-                        trade.status = "REENTERED";
-                        await trade.save();
-                        console.log(`[TRADE-ENGINE] 🔄 Updated trade state to REENTERED for DB record ${tradeId}`);
-                    } else {
-                        const solPrice = solanaService.getSolPriceUSD() || 150;
-                        const entryMcUsd = tokenData.marketCapUSD || 0;
-                        const entryMcSol = entryMcUsd > 0 ? (entryMcUsd / solPrice) : (this.tokenCache.get(mint)?.highestMCReached || 100);
+        // ---- SELL ----
+        const hasFill = Boolean(fill) && fill.tokenDelta < 0;
+        const isFullExit = parseSellFraction(amount) >= 1;
+        let pnlLine = '';
+        if (trade) {
+            const update = { $push: { sellSignatures: signature } };
+            if (hasFill) {
+                update.$inc = { solReceived: fill.solDelta, tokensSold: -fill.tokenDelta, feesSol: fill.feeSol || 0 };
+                if (isPaper && isFullExit && (trade.rentPaid || 0) > 0) {
+                    update.$inc.rentReclaimed = Math.max(0, trade.rentPaid - BASE_FEE_SOL);
+                }
+            } else {
+                update.$set = { accountingIncomplete: true };
+            }
+            await ActiveTrade.updateOne({ _id: trade._id }, update);
 
-                        await ActiveTrade.create({
-                            mint,
-                            tokenName,
-                            entryPrice: entryMcUsd > 0 ? (entryMcUsd / 1_000_000_000) : 0,
-                            entryMarketCap: entryMcSol,
-                            entryMarketCapUSD: entryMcUsd,
-                            amountSolInvested: amount,
-                            tokensReceived: 0,
-                            status: "OPEN",
-                            source,
-                            mirroredWallet,
-                            convictionTier,
-                            priorityFeePaid: priorityFee
-                        });
-                        console.log(`[TRADE-ENGINE] 💾 Saved new ActiveTrade for ${mint} (Entry MC: ${entryMcSol.toFixed(2)} SOL / $${entryMcUsd.toFixed(0)} USD). Watching for 1.4x TP, +20% Breakeven Arm, -28% SL & 15m Timeout.`);
-                        
-                        const wsService = require('./pumpportal.service');
-                        wsService.watchToken(mint);
-                    }
-                } else if(action === "sell") {
-                    const tokenData = await this.resolveTokenMetadata(mint);
-                    const tokenName = tokenData ? `${tokenData.name} (${tokenData.symbol})` : 'Solana Token';
-                    const links = getTokenLinks(mint);
+            if (hasFill && (trade.solSpent || 0) > 0 && !trade.accountingIncomplete) {
+                const receivedSoFar = (trade.solReceived || 0) + fill.solDelta;
+                if (isFullExit) {
+                    const pnl = receivedSoFar + (isPaper ? Math.max(0, (trade.rentPaid || 0) - BASE_FEE_SOL) : 0) - trade.solSpent;
+                    const pct = (pnl / trade.solSpent) * 100;
+                    pnlLine = `📊 *Realized PnL:* ${pnl >= 0 ? '🟢 +' : '🔴 '}\`${pnl.toFixed(5)} SOL\` (${pnl >= 0 ? '+' : ''}${pct.toFixed(1)}%)${isPaper ? '' : ' before deposit refund'}\n`;
+                } else {
+                    pnlLine = `💵 *Received:* \`${fill.solDelta.toFixed(5)} SOL\` (total back so far \`${receivedSoFar.toFixed(5)}\` of \`${trade.solSpent.toFixed(5)}\` spent)\n`;
+                }
+            }
+        }
 
-                    let triggerDesc = 'Take Profit (1.4x) / Stop Loss Guard';
-                    if (source === 'MOONBAG_MAX_TP_5X' || source === 'MAX_TP_5X') {
-                        triggerDesc = '🚀 *5x Max Target Hit!* (Cashed out 100% full profit at 5.0x / +400% gain)';
-                    } else if (source === 'TAKE_PROFIT_1_4X') {
-                        triggerDesc = '🎯 *1.4x Take Profit* (Sold 75%, holding 25% moonbag)';
-                    } else if (source === 'TAKE_PROFIT_2X') {
-                        triggerDesc = '🎯 *2x Take Profit* (Sold 75%, holding 25% moonbag)';
-                    } else if (source === 'BREAKEVEN_STOP') {
-                        triggerDesc = '🛡️ *Breakeven Guard* (Hit +20% peak, exited at entry price to preserve $0 loss)';
-                    } else if (source === 'TIMEOUT_STAGNANT_15M') {
-                        triggerDesc = '⏳ *15-Min Stagnation Guard* (Position stalled in red for 15m; cut early)';
-                    } else if (source === 'STOP_LOSS_28' || source === 'STOP_LOSS_54') {
-                        triggerDesc = '🛑 *Stop Loss Guard* (Sold off 100% at -28% drop)';
-                    } else if (source === 'TRAILING_STOP_MOONBAG') {
-                        triggerDesc = '🪂 *Moonbag Trailing Stop* (Sold 100% remaining moonbag at -20% from peak)';
-                    } else if (source === 'MOONBAG_ENTRY_FLOOR') {
-                        triggerDesc = '🛡️ *Moonbag Entry Floor* (Retraced to entry price; locked in $0 moonbag loss)';
-                    } else if (source === 'MOONBAG_TIMEOUT_30M') {
-                        triggerDesc = '⏳ *Moonbag 30-Min Expiration* (30m elapsed post-TP; cashed out remaining bag into SOL)';
-                    } else if (source === 'WHALE_MIRROR' || source === 'COPY_TRADE') {
-                        triggerDesc = '🪞 *Mirrored Whale Exit* (Whale sold ➔ Sold 100%)';
-                    } else if (source === 'MANUAL_TELEGRAM' || source === 'MANUAL_PANIC') {
-                        triggerDesc = '⚡ *Manual Admin Emergency Exit*';
-                    } else if (isReentry) {
-                        triggerDesc = '🦅 Dip Re-entry Take Profit';
-                    }
+        const triggerLabels = {
+            MOONBAG_MAX_TP_5X: '🚀 5x Max Target Hit',
+            MAX_TP_5X: '🚀 5x Max Target Hit',
+            TAKE_PROFIT_1_4X: '🎯 1.4x Take Profit (sold 75%, holding 25%)',
+            TAKE_PROFIT_2X: '🎯 2x Take Profit (sold 75%, holding 25%)',
+            BREAKEVEN_STOP: '🛡️ Breakeven Guard (peaked above +20%, exited near entry)',
+            TIMEOUT_STAGNANT_15M: '⏳ 15 Min Stagnation Guard',
+            STOP_LOSS_28: '🛑 Stop Loss Guard',
+            STOP_LOSS_54: '🛑 Stop Loss Guard',
+            TRAILING_STOP_MOONBAG: '🪂 Moonbag Trailing Stop',
+            MOONBAG_ENTRY_FLOOR: '🛡️ Moonbag Entry Floor',
+            MOONBAG_TIMEOUT_30M: '⏳ Moonbag 30 Min Expiration',
+            WHALE_MIRROR: '🪞 Mirrored Whale Exit',
+            COPY_TRADE: '🪞 Mirrored Whale Exit',
+            MANUAL_TELEGRAM: '⚡ Manual Admin Exit',
+            MANUAL_PANIC: '⚡ Manual Admin Emergency Exit'
+        };
+        const triggerDesc = triggerLabels[source] || (isReentry ? '🦅 Dip Re-entry Take Profit' : 'Exit Rule');
 
-                    const sellAlert =
-`🟢💰 *[MY TRADE] RAZOR BOT SELL CONFIRMED* 💸🟢\n` +
+        const sellAlert =
+`💰 ${tag} *RAZOR SELL ${isPaper ? 'SIMULATED' : 'CONFIRMED'}*\n` +
 `━━━━━━━━━━━━━━━━━━━━\n` +
-`✅ _Confirmed On-Chain on Solana Blockchain_\n\n` +
 `🪙 *Token:* [${tokenName}](${links.tokenUrl})\n` +
 `🏷️ *CA:* \`${mint}\`\n` +
 `🎯 *Exit Trigger:* ${triggerDesc}\n` +
-`💰 *My Allocation:* \`${amount}\` Position Closed\n` +
-`🔗 *Verified TX:* [View on Solscan](https://solscan.io/tx/${signature})\n` +
+`📤 *Sold:* \`${amount}\` of position\n` +
+`${pnlLine}` +
+`${txLine}\n` +
 `━━━━━━━━━━━━━━━━━━━━`;
 
-                    // RAZOR BOT SELL CONFIRMED is our bot's executed trade — send to BOTH admin DM and the public group/channel!
-                    // Alert deduplication: Suppress duplicate alerts for the same token and exit trigger within 45 seconds
-                    if (!this.recentAlertsCache) this.recentAlertsCache = new Set();
-                    const alertKey = `${mint}_${source}`;
-                    if (!this.recentAlertsCache.has(alertKey)) {
-                        this.recentAlertsCache.add(alertKey);
-                        setTimeout(() => this.recentAlertsCache.delete(alertKey), 45000);
-                        telegramService.sendAlert(sellAlert, sellAlert, mint);
-                    } else {
-                        console.log(`[TRADE-ENGINE] ℹ️ Suppressed duplicate Telegram sell alert for ${alertKey}`);
-                    }
+        if (!this.recentAlertsCache) this.recentAlertsCache = new Set();
+        const alertKey = `${mode}_${mint}_${source}`;
+        if (!this.recentAlertsCache.has(alertKey)) {
+            this.recentAlertsCache.add(alertKey);
+            setTimeout(() => this.recentAlertsCache.delete(alertKey), 45000);
+            if (isPaper) await telegramService.sendAdminDirectMessage(sellAlert);
+            else telegramService.sendAlert(sellAlert, sellAlert, mint);
+        }
 
-                    if(tradeId) {
-                        const trade = await ActiveTrade.findById(tradeId);
-                        if(trade && source !== "TAKE_PROFIT_1_4X" && source !== "TAKE_PROFIT_2X") {
-                            trade.status = "CLOSED";
-                            trade.closedAt = new Date();
-                            trade.closeReason = source;
-                            await trade.save();
-                        }
-                    }
+        const closeId = tradeId || (trade && isFullExit ? trade._id : null);
+        if (closeId && source !== 'TAKE_PROFIT_1_4X' && source !== 'TAKE_PROFIT_2X') {
+            await ActiveTrade.updateOne(
+                { _id: closeId, status: { $ne: 'CLOSED' } },
+                { $set: { status: 'CLOSED', closedAt: new Date(), closeReason: source } }
+            );
+        }
+    }
+
+    /** After a full live exit, close the empty token account and book the refunded deposit. */
+    async reclaimRent(mint, tradeDocId) {
+        if (!this.cfg.closeTokenAccounts || !this.myKeypair) return;
+        try {
+            // Give the sell a moment to settle so the account reads as empty.
+            await new Promise(r => setTimeout(r, 4000));
+            const res = await solanaService.closeEmptyTokenAccounts(this.myKeypair, mint);
+            if (res.reclaimedSol > 0) {
+                console.log(`[TRADE-ENGINE] ♻️ Closed empty token account for ${mint}. Recovered ${res.reclaimedSol.toFixed(5)} SOL.`);
+                if (tradeDocId) {
+                    await ActiveTrade.updateOne({ _id: tradeDocId }, { $inc: { rentReclaimed: res.reclaimedSol } });
                 }
-                
-                return signature;
             }
-        } catch(err) {
-            console.error("[TRADE-ENGINE] ❌ Error executing trade:", err.response?.data || err.message);
+        } catch (e) {
+            console.warn(`[TRADE-ENGINE] ⚠️ Could not close token account for ${mint}: ${e.message}`);
+        }
+    }
+
+    async executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet = null, tradeId = null, isReentry = false, convictionTier = 'STANDARD', forcePool = null) {
+        // Which position does this order belong to?
+        let trade = null;
+        try {
+            if (tradeId) trade = await ActiveTrade.findById(tradeId);
+            if (!trade && action === 'sell') {
+                trade = await ActiveTrade.findOne({ mint, status: { $in: OPEN_STATUSES } }).sort({ createdAt: -1 });
+            }
+        } catch {}
+
+        // Buys follow the configured mode. Sells follow the mode the position was opened in.
+        const isPaper = action === 'buy' ? this.cfg.isPaper : Boolean(trade && trade.mode === 'paper');
+        if (isPaper) {
+            try {
+                return await this.executePaperTrade({ mint, action, amount, priorityFee, source, mirroredWallet, trade, tradeId, isReentry, convictionTier });
+            } catch (err) {
+                console.error('[TRADE-ENGINE] ❌ Paper trade error:', err.message);
+                return null;
+            }
+        }
+        if (action === 'sell' && this.cfg.isPaper && !trade) {
+            console.log(`[TRADE-ENGINE] 📝 Paper mode: ignoring sell for ${mint} (no position on record).`);
+            return null;
+        }
+
+        if (!this.myKeypair) {
+            await this.notifyFailure(action, mint, 'Wallet private key is not loaded');
+            return null;
+        }
+
+        await this.updateMyBalance(3000);
+        if (action === 'buy' && this.myBalance < 0.005) {
+            console.log(`[TRADE-ENGINE] ℹ️ Insufficient liquid balance (${this.myBalance.toFixed(4)} SOL). Skipping trade broadcast for ${mint}.`);
+            return null;
+        }
+        if (action === 'sell' && this.myBalance < 0.0005) {
+            await this.notifyFailure('sell', mint, `Wallet holds ${this.myBalance.toFixed(5)} SOL, not enough to pay the network fee for the exit`, 'Fund the wallet to let the exit through.');
+            return null;
+        }
+
+        // Token balance before the order. null means "could not read", which is not the same as zero.
+        const preTokenBal = await solanaService.getTokenBalance(this.myWalletKey, mint);
+        if (action === 'sell' && preTokenBal !== null && preTokenBal <= 0) {
+            console.log(`[TRADE-ENGINE] ℹ️ Zero token balance on-chain for ${mint}. Nothing to sell.`);
+            if (trade && trade.status !== 'CLOSED') {
+                trade.status = 'CLOSED';
+                trade.closedAt = new Date();
+                trade.closeReason = source;
+                await trade.save();
+            }
+            return null;
+        }
+
+        try {
+            // Route to the AMM pool directly when the bonding curve has completed.
+            let targetPool = forcePool || 'auto';
+            if (!forcePool && mint && mint.endsWith('pump')) {
+                try {
+                    const curve = await this.checkBondingCurveStatus(mint);
+                    if (curve && curve.isComplete) targetPool = 'pump-amm';
+                } catch {}
+            }
+
+            const slippage = action === 'sell' ? this.cfg.sellSlippagePct : this.cfg.buySlippagePct;
+            console.log(`[TRADE-ENGINE] 📡 Requesting ${action.toUpperCase()} (${amount}) from PumpPortal for ${mint} [pool ${targetPool}, slippage ${slippage}%]`);
+            const response = await axios.post('https://pumpportal.fun/api/trade-local', {
+                publicKey: this.myWalletKey,
+                action,
+                mint,
+                amount,
+                denominatedInSol: denominatedInSol ? 'true' : 'false',
+                slippage,
+                priorityFee,
+                pool: targetPool
+            }, { responseType: 'arraybuffer', timeout: 10000 });
+
+            const buffer = Buffer.from(response.data);
+            const asText = buffer.toString('utf8');
+            if (asText.startsWith('{') && asText.includes('"error"')) {
+                let msg = asText;
+                try { msg = JSON.parse(asText).error || asText; } catch {}
+                await this.notifyFailure(action, mint, `PumpPortal rejected the order: ${String(msg).slice(0, 160)}`);
+                return null;
+            }
+
+            const tx = VersionedTransaction.deserialize(new Uint8Array(buffer));
+            try {
+                tx.message.recentBlockhash = await solanaService.getLatestBlockhashSafe();
+            } catch (bhErr) {
+                console.warn('[TRADE-ENGINE] ⚠️ Could not fetch a fresh blockhash, using the one PumpPortal supplied:', bhErr.message);
+            }
+            tx.sign([this.myKeypair]);
+
+            const retryOnAmm = async (errText) => {
+                if (errText.includes('6005') && targetPool !== 'pump-amm') {
+                    console.log(`[TRADE-ENGINE] 🔄 Token left the bonding curve. Retrying ${action.toUpperCase()} on the AMM pool...`);
+                    return await this.executeTradeLocal(mint, action, amount, denominatedInSol, priorityFee, source, mirroredWallet, tradeId, isReentry, convictionTier, 'pump-amm');
+                }
+                return undefined;
+            };
+
+            // Dry run first: a transaction that would fail is never sent, so it never costs a fee.
+            const sim = await solanaService.simulateSafe(tx);
+            if (!sim.ok) {
+                const retried = await retryOnAmm(JSON.stringify(sim.err || ''));
+                if (retried !== undefined) return retried;
+                await this.notifyFailure(action, mint, describeTxError(sim.err, sim.logs), 'Caught in the dry run. Nothing was sent and no fee was paid.');
+                return null;
+            }
+
+            let signature;
+            try {
+                signature = await solanaService.sendTransactionSafe(tx, { skipPreflight: true, maxRetries: 5 });
+                console.log(`[TRADE-ENGINE] 📡 Broadcast ${signature}. Waiting for confirmation...`);
+            } catch (sendErr) {
+                await this.notifyFailure(action, mint, `No RPC accepted the transaction: ${sendErr.message}`);
+                return null;
+            }
+
+            const conf = await solanaService.confirmSignature(signature, this.cfg.confirmTimeoutMs);
+            if (conf.status === 'failed') {
+                const retried = await retryOnAmm(JSON.stringify(conf.err || ''));
+                if (retried !== undefined) return retried;
+                await this.notifyFailure(action, mint, describeTxError(conf.err), `Failed on chain: https://solscan.io/tx/${signature}`);
+                return null;
+            }
+
+            if (conf.status === 'unknown') {
+                // Not seeing a confirmation is NOT proof of failure. Check what the wallet actually holds.
+                await new Promise(r => setTimeout(r, 3000));
+                const postTokenBal = await solanaService.getTokenBalance(this.myWalletKey, mint);
+                const landed = postTokenBal !== null && preTokenBal !== null && (
+                    action === 'buy' ? postTokenBal > preTokenBal : postTokenBal < preTokenBal
+                );
+                if (!landed) {
+                    await this.notifyFailure(action, mint, 'Confirmation timed out and the wallet balance does not show the trade', `Status unknown. Check https://solscan.io/tx/${signature} before retrying.`);
+                    return null;
+                }
+                console.log(`[TRADE-ENGINE] ✅ ${action.toUpperCase()} ${signature} reconciled from the wallet balance after a confirmation timeout.`);
+            } else {
+                console.log(`[TRADE-ENGINE] ✅ Confirmed on chain: https://solscan.io/tx/${signature}`);
+            }
+
+            // What did the transaction really do to the wallet?
+            let fill = null;
+            try {
+                const parsed = await solanaService.fetchParsedTransactionSafe(signature);
+                fill = parsed ? parseOwnFill(parsed, this.myWalletKey, mint) : null;
+            } catch {}
+            if (!fill) console.warn(`[TRADE-ENGINE] ⚠️ Could not read the fill for ${signature}. The trade is kept but excluded from PnL stats.`);
+
+            await this.recordFill({ mode: 'live', mint, action, amount, fill, signature, source, mirroredWallet, trade, tradeId, isReentry, convictionTier, priorityFee });
+
+            if (action === 'sell' && parseSellFraction(amount) >= 1) {
+                this.reclaimRent(mint, trade ? trade._id : tradeId).catch(() => {});
+            }
+            return signature;
+        } catch (err) {
+            const detail = err.response?.data ? Buffer.from(err.response.data).toString('utf8').slice(0, 160) : err.message;
+            await this.notifyFailure(action, mint, `Unexpected error: ${detail}`);
             return null;
         }
     }
